@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build archives
+        run: ./scripts/make.sh --archive
+        env:
+          VERSION: ${{ github.ref_name }}
+
+      - name: Upload release assets
+        run: gh release upload ${{ github.ref_name }} .build/*
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
