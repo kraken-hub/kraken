@@ -45,6 +45,62 @@ func newAliasNode(name string) *yaml.AliasNode {
 
 // --- prepareEnvNode / findEnvNode / replaceAnchorUsageNode ---
 
+// --- envKeyParts ---
+
+func TestEnvKeyParts_PlainKey(t *testing.T) {
+	if got := envKeyParts("~prod"); !reflect.DeepEqual(got, []string{"prod"}) {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestEnvKeyParts_CommaList(t *testing.T) {
+	if got := envKeyParts("~dev,test"); !reflect.DeepEqual(got, []string{"dev", "test"}) {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestEnvKeyParts_HashDisambiguatorStripped(t *testing.T) {
+	if got := envKeyParts("~prod#before"); !reflect.DeepEqual(got, []string{"prod"}) {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestEnvKeyParts_HashDisambiguatorWithCommaList(t *testing.T) {
+	if got := envKeyParts("~dev,test#note"); !reflect.DeepEqual(got, []string{"dev", "test"}) {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestPrepareEnvNode_HashDisambiguatorAllowsRepeatedEnvKey(t *testing.T) {
+	// Two distinct top-level keys ("~prod#before" / "~prod#after") both
+	// merge for env "prod" - the "#..." suffix is a disambiguator, not
+	// part of the matched environment name.
+	doc := `
+~prod#before:
+  cache:
+    image: redis
+app:
+  image: myapp
+~prod#after:
+  worker:
+    image: myapp
+`
+	node := mustLoadNode(t, doc)
+	ctx := yaml.NewCtx()
+	ctx.Index(node)
+	prepareEnvNode(ctx, node, "prod")
+
+	got := dumpToValue(t, node)
+	want := map[string]interface{}{
+		"cache":  map[string]interface{}{"image": "redis"},
+		"app":    map[string]interface{}{"image": "myapp"},
+		"worker": map[string]interface{}{"image": "myapp"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
 func TestPrepareEnvNode_MatchingSectionMerged(t *testing.T) {
 	doc := `
 app:
@@ -555,6 +611,40 @@ func TestAppendNode_OverwritesExistingScalarInPlace(t *testing.T) {
 	_, fooNode := findKeyValue(envMap, "FOO")
 	if yaml.ScalarText(fooNode) != "newval" {
 		t.Fatalf("expected FOO overwritten to 'newval', got %q", yaml.ScalarText(fooNode))
+	}
+}
+
+func TestAppendNode_PrependsIntoExistingNestedKeyWhenSourcePrecedesTarget(t *testing.T) {
+	// "services" already exists (with "app"); the merge source sat at
+	// index 0 in root, before "services" (index 0, post-removal) - so new
+	// nested keys should land before "app", not after it.
+	root := mapping(pair(str("services"), mapping(strPair("app", "1"))))
+	toMerge := mapping(pair(str("services"), mapping(strPair("cache", "2"))))
+
+	appendNode(yaml.NewCtx(), root, toMerge, 0)
+
+	_, servicesNode := findKeyValue(root, "services")
+	servicesMap := servicesNode.(*yaml.MappingNode)
+	if keys := mapKeys(servicesMap); !reflect.DeepEqual(keys, []string{"cache", "app"}) {
+		t.Fatalf("got keys %#v, want [cache app]", keys)
+	}
+}
+
+func TestAppendNode_AppendsIntoExistingNestedKeyWhenSourceFollowsTarget(t *testing.T) {
+	// Merge source sat at index 1 in root, after "services" (index 0) -
+	// new nested keys should land after "app", preserving read order.
+	root := mapping(
+		pair(str("services"), mapping(strPair("app", "1"))),
+		strPair("other", "x"),
+	)
+	toMerge := mapping(pair(str("services"), mapping(strPair("cache", "2"))))
+
+	appendNode(yaml.NewCtx(), root, toMerge, 1)
+
+	_, servicesNode := findKeyValue(root, "services")
+	servicesMap := servicesNode.(*yaml.MappingNode)
+	if keys := mapKeys(servicesMap); !reflect.DeepEqual(keys, []string{"app", "cache"}) {
+		t.Fatalf("got keys %#v, want [app cache]", keys)
 	}
 }
 

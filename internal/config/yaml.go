@@ -18,7 +18,7 @@ func prepareEnvNode(ctx *yaml.Ctx, node yaml.Node, env string) {
 			}
 
 			envs := strings.Split(env, ",")
-			parts := strings.Split(string([]rune(yaml.ScalarText(mv.Key))[1:]), ",")
+			parts := envKeyParts(yaml.ScalarText(mv.Key))
 
 			envVal := mv.Value
 			yaml.RemovePair(m, index)
@@ -97,6 +97,19 @@ func isAliasTo(ctx *yaml.Ctx, n yaml.Node, anchor yaml.Node) bool {
 	return yaml.Resolve(ctx, n) == anchor
 }
 
+// envKeyParts returns the comma-separated environment names from a `~env`
+// key, e.g. "~prod,test" -> ["prod", "test"]. Anything from a "#" onward is
+// a disambiguator, dropped before splitting - it lets multiple `~env`
+// sections targeting the same environment(s) coexist as distinct YAML
+// mapping keys (YAML disallows duplicate keys at the same level) without
+// that suffix itself being treated as another environment name to match.
+func envKeyParts(key string) []string {
+	if idx := strings.IndexByte(key, '#'); idx != -1 {
+		key = key[:idx]
+	}
+	return strings.Split(string([]rune(key)[1:]), ",")
+}
+
 func findEnvNode(ctx *yaml.Ctx, node yaml.Node) (int, *yaml.MappingValueNode) {
 	m, ok := yaml.Resolve(ctx, node).(*yaml.MappingNode)
 	if !ok {
@@ -136,6 +149,15 @@ func extendNode(ctx *yaml.Ctx, rootNode *yaml.MappingNode, node yaml.Node) {
 // keys whose value is anything else (a scalar, sequence, ...) are
 // overwritten in place. New keys are inserted starting at index (or
 // appended if index is -1), preserving their relative order.
+//
+// index is root's own insertion point (where node's source section sat
+// before removal, or -1 if there's no such position). When recursing into an
+// existing nested mapping, that same position is compared against the
+// matched key's position in root: if node's section preceded the key in the
+// source, new nested keys are inserted at the front of the nested mapping
+// (so they keep reading before it); otherwise they're appended, keeping the
+// merge's on-page order intuitive instead of always dumping merged keys at
+// the very end regardless of where the source section was written.
 func appendNode(ctx *yaml.Ctx, root *yaml.MappingNode, node yaml.Node, index int) {
 	m, ok := yaml.Resolve(ctx, node).(*yaml.MappingNode)
 	if !ok {
@@ -157,7 +179,11 @@ func appendNode(ctx *yaml.Ctx, root *yaml.MappingNode, node yaml.Node, index int
 		}
 
 		if existingMap, ok := yaml.Resolve(ctx, existing).(*yaml.MappingNode); ok {
-			appendNode(ctx, existingMap, mv.Value, -1)
+			nestedIndex := -1
+			if index != -1 && index <= idx {
+				nestedIndex = 0
+			}
+			appendNode(ctx, existingMap, mv.Value, nestedIndex)
 		} else {
 			yaml.ReplacePairValue(root, idx, yaml.Resolve(ctx, mv.Value))
 		}

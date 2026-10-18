@@ -22,11 +22,12 @@ Keys prefixed with `~` are environment-scoped and merged only when the app envir
 
 ```yaml
 ~prod:
-  cache:
-    image: redis
-  worker:
-    image: myapp
-    scale: 5
+  services:
+    cache:
+      image: redis
+    worker:
+      image: myapp
+      scale: 5
 
 services:
   app:
@@ -40,7 +41,26 @@ services:
 
 The `~key` is a comma-separated list of environment names. For `dev,test` mode both `~dev` and `~dev,test` sections match. The matched section is merged into the parent and the `~key` is removed.
 
-For the example above, in `prod` mode the final config will include the `cache` and `worker` services, and `app` will have `restart: always`.
+For the example above, in `prod` mode the final config will include the `cache` and `worker` services, and `app` will have `restart: always`. Where a merged section lands relative to existing keys follows the source: `~prod` is written before `services:`, so `cache`/`worker` are merged in before `app`; a `~prod` block written after `services:` would instead merge its entries in after.
+
+To split prod-only additions into more than one block, YAML won't allow two `~prod:` keys at the same level — append `#<tag>` (e.g. `~prod#before`, `~prod#after`); anything from `#` onward is ignored when matching, it just makes the key unique.
+
+```yaml
+~prod#before:
+  services:
+    cache:
+      image: redis
+
+services:
+  app:
+    image: myapp
+
+~prod#after:
+  services:
+    worker:
+      image: myapp
+      scale: 2
+```
 
 ---
 
@@ -365,6 +385,7 @@ Mapping form:
 volumes:
   /host/path: /container/path   # absolute bind mount
   ./data: /app/data             # relative to app directory
+  .dotfile: /container/.dotfile # dotfile, relative to app directory
   mydata: /app/data             # named volume (see top-level volumes:)
   logs: /app/logs               # local volume under kraken volumes root
   /app/cache:                   # anonymous volume (null target)
@@ -382,10 +403,12 @@ volumes:
 Resolution order for the source:
 1. Absolute path → used as-is (bind mount; host directory is created if it does not exist)
 2. Starts with `./` or `../` → resolved relative to app directory (bind mount; host directory is created if it does not exist)
-3. Contains `/` → resolved relative to app directory (bind mount; host directory is created if it does not exist)
+3. Contains `/` or starts with `.` (e.g. `.dotfile`) → resolved relative to app directory (bind mount; host directory is created if it does not exist)
 4. Matches a name in top-level `volumes:` with `driver`/`driver_opts` → `kraken_vol.{app}.{vol}`
 5. Matches a name in top-level `volumes:` with `external` → external volume name used as-is
 6. Otherwise → managed volume `kraken_vol.{app}.{service}.{md5(path)}`
+
+An existing host file or directory is mounted as-is, so single files can be bind-mounted.
 
 ---
 

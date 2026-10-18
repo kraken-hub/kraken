@@ -788,6 +788,7 @@ func TestResolveVolumeSrc(t *testing.T) {
 		{"dot dot slash prefix", "../data", nil, filepath.Join("/app", "../data")},
 		{"dot alone", ".", nil, filepath.Join("/app", ".")},
 		{"relative with slash", "sub/data", nil, filepath.Join("/app", "sub/data")},
+		{"dotfile", ".dotfile", nil, filepath.Join("/app", ".dotfile")},
 		{"managed volume key", "data", map[string]string{"data": "kraken_vol.myapp.data"}, "kraken_vol.myapp.data"},
 		{"unmanaged named volume falls back to service volume", "cache", nil, ServiceVolumeName("myapp", "web", "cache")},
 	}

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/containerd/errdefs"
+
 	"github.com/kraken-hub/kraken/internal/app"
 	"github.com/kraken-hub/kraken/internal/runtime"
 	"github.com/kraken-hub/kraken/internal/store"
@@ -62,8 +64,17 @@ func CreateContainers(kraken *app.Kraken, appName, serviceFilter string, startAf
 				return err
 			}
 			if containerExists {
+				info, err := rt.ContainerInspect(ctx, instanceCfg.Name)
+				if err != nil {
+					return err
+				}
+				if info.Labels[LabelApp] != appName || info.Labels[LabelService] != serviceName {
+					return fmt.Errorf("container `%s` already exists but is not managed by kraken (labels %s=%s, %s=%s missing), remove it manually",
+						instanceCfg.Name, LabelApp, appName, LabelService, serviceName)
+				}
 				log.Warn("Container `%s` already exists, skipping create", instanceCfg.Name)
 				if startAfter {
+					log.Info("Starting `%s` container.", instanceCfg.Name)
 					if err := rt.ContainerStart(ctx, instanceCfg.Name); err != nil {
 						log.Warn("Warning starting `%s`: %v", instanceCfg.Name, err)
 					}
@@ -261,7 +272,9 @@ func RemoveImages(kraken *app.Kraken, appName, serviceFilter string) error {
 			continue
 		}
 		if err := rt.ImageRemove(ctx, imageName, false); err != nil {
-			log.Warn("Warning removing image `%s`: %v", imageName, err)
+			if !errdefs.IsConflict(err) {
+				log.Warn("Warning removing image `%s`: %v", imageName, err)
+			}
 		} else {
 			log.Warn("Image `%s` removed.", imageName)
 		}

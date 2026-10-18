@@ -171,6 +171,91 @@ services:
 	}
 }
 
+func TestPrepareYaml_EnvSection_TopLevelMergePreservesSourceOrder(t *testing.T) {
+	// ~prod is written before services: in the source, so its merged
+	// "cache"/"worker" entries should read before the pre-existing "app"
+	// service, not after it.
+	doc := `
+~prod:
+  services:
+    cache:
+      image: redis
+    worker:
+      image: myapp
+
+services:
+  app:
+    image: myapp
+`
+	node := mustLoadNode(t, doc)
+	if err := PrepareYaml(node, "prod"); err != nil {
+		t.Fatalf("PrepareYaml failed: %v", err)
+	}
+
+	out, err := yaml.Dump(node)
+	if err != nil {
+		t.Fatalf("yaml.Dump failed: %v", err)
+	}
+	want := `
+services:
+  cache:
+    image: redis
+  worker:
+    image: myapp
+  app:
+    image: myapp
+`
+	if string(out) != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+func TestPrepareYaml_EnvSection_HashDisambiguatorBothSidesOfServices(t *testing.T) {
+	// "~prod#before" and "~prod#after" are distinct YAML keys (avoiding
+	// the duplicate-key parse error a plain repeated "~prod:" would cause)
+	// but both still match env "prod"; each merges its services on its own
+	// side of the pre-existing "app", preserving source order.
+	doc := `
+~prod#before:
+  services:
+    cache:
+      image: redis
+
+services:
+  app:
+    image: myapp
+
+~prod#after:
+  services:
+    worker:
+      image: myapp
+      scale: 2
+`
+	node := mustLoadNode(t, doc)
+	if err := PrepareYaml(node, "prod"); err != nil {
+		t.Fatalf("PrepareYaml failed: %v", err)
+	}
+
+	out, err := yaml.Dump(node)
+	if err != nil {
+		t.Fatalf("yaml.Dump failed: %v", err)
+	}
+	want := `
+services:
+  cache:
+    image: redis
+  app:
+    image: myapp
+  worker1:
+    image: myapp
+  worker2:
+    image: myapp
+`
+	if string(out) != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
 func TestPrepareYaml_EnvSection_NonMatchingEnvDropsService(t *testing.T) {
 	doc := `
 services:

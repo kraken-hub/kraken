@@ -18,6 +18,9 @@ func main() {
 	}
 
 	if err := kraken.RootCmd().Execute(); err != nil {
+		if sigErr := app.InterruptedBy(kraken.Context()); sigErr != nil {
+			os.Exit(sigErr.ExitCode())
+		}
 		kraken.Logger().Fatal("%s", err)
 		os.Exit(1)
 	}

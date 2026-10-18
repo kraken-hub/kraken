@@ -139,7 +139,10 @@ func EnsureServiceVolumes(kraken *app.Kraken, appName, serviceName string, cfg *
 			continue // anonymous volume
 		}
 		if vm.Source[0] == '/' {
-			// Bind mount — ensure the host directory exists.
+			// Bind mount — ensure the host path exists; an existing file is fine.
+			if _, err := os.Stat(vm.Source); err == nil {
+				continue
+			}
 			if err := os.MkdirAll(vm.Source, 0o755); err != nil {
 				return fmt.Errorf("create bind-mount directory %q: %w", vm.Source, err)
 			}

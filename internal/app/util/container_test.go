@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/errdefs"
+
 	"github.com/kraken-hub/kraken/internal/runtime"
 	"github.com/kraken-hub/kraken/internal/store"
 )
@@ -527,6 +529,34 @@ func TestRemoveImages(t *testing.T) {
 		if err := RemoveImages(tk.Kraken, "removeimgapp3", ""); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
+		if !strings.Contains(tk.stdout(), "Warning removing image") {
+			t.Errorf("expected a removal warning to be logged, stdout = %q", tk.stdout())
+		}
+	})
+
+	t.Run("conflict error (image still in use by another container) is silently skipped", func(t *testing.T) {
+		if err := store.SaveApp(&store.App{
+			Key: "removeimgapp4",
+			Value: store.AppValue{
+				Path:   "/app/removeimgapp4",
+				Config: store.AppConfig{Data: "services:\n  web:\n    build: .\n"},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		rt := &fakeRuntime{
+			ImageExistsFn: func(ctx context.Context, image string) (bool, error) { return true, nil },
+			ImageRemoveFn: func(ctx context.Context, image string, force bool) error {
+				return errdefs.ErrConflict.WithMessage(`conflict: unable to remove repository reference "web" (must force) - container abc123 is using its referenced image def456`)
+			},
+		}
+		tk := newTestKraken(t, rt)
+		if err := RemoveImages(tk.Kraken, "removeimgapp4", ""); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if strings.Contains(tk.stdout(), "Warning removing image") {
+			t.Errorf("expected no removal warning for a conflict error, stdout = %q", tk.stdout())
+		}
 	})
 }
 
@@ -597,6 +627,9 @@ func TestCreateContainers(t *testing.T) {
 			ContainerExistsFn: func(ctx context.Context, nameOrID string) (bool, error) {
 				return true, nil
 			},
+			ContainerInspectFn: func(ctx context.Context, id string) (*runtime.ContainerInfo, error) {
+				return &runtime.ContainerInfo{Labels: map[string]string{LabelApp: "createapp2", LabelService: "web"}}, nil
+			},
 			ContainerStartFn: func(ctx context.Context, id string) error {
 				started = true
 				return nil
@@ -608,6 +641,44 @@ func TestCreateContainers(t *testing.T) {
 		}
 		if !started {
 			t.Error("expected existing container to be started")
+		}
+	})
+
+	t.Run("existing container not managed by kraken errors without starting", func(t *testing.T) {
+		appPath := t.TempDir()
+		if err := store.SaveApp(&store.App{
+			Key: "createapp4",
+			Value: store.AppValue{
+				Path:   appPath,
+				Config: store.AppConfig{Data: "services:\n  web:\n    image: nginx\n"},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		var started bool
+		rt := &fakeRuntime{
+			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) { return true, "net-" + name, nil },
+			ImageExistsFn:   func(ctx context.Context, image string) (bool, error) { return true, nil },
+			ImageVolumesFn:  func(ctx context.Context, image string) ([]string, error) { return nil, nil },
+			ContainerExistsFn: func(ctx context.Context, nameOrID string) (bool, error) {
+				return true, nil
+			},
+			ContainerInspectFn: func(ctx context.Context, id string) (*runtime.ContainerInfo, error) {
+				return &runtime.ContainerInfo{Labels: map[string]string{"other.app": "createapp4"}}, nil
+			},
+			ContainerStartFn: func(ctx context.Context, id string) error {
+				started = true
+				return nil
+			},
+		}
+		tk := newTestKraken(t, rt)
+		err := CreateContainers(tk.Kraken, "createapp4", "", true)
+		if err == nil || !strings.Contains(err.Error(), "not managed by kraken") {
+			t.Fatalf("err = %v, want 'not managed by kraken' error", err)
+		}
+		if started {
+			t.Error("unmanaged container must not be started")
 		}
 	})
 

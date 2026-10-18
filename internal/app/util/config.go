@@ -595,8 +595,9 @@ func resolveVolumeSrc(source, appPath, appName, serviceName string, managedVolum
 	if strings.HasPrefix(source, "./") || strings.HasPrefix(source, "../") || source == "." {
 		return filepath.Join(appPath, source)
 	}
-	// Relative path with directory separator — relative to appPath
-	if strings.Contains(source, "/") {
+	// Relative path with directory separator, or a dotfile/dotdir name (a leading
+	// dot is never a valid volume name) — relative to appPath
+	if strings.Contains(source, "/") || strings.HasPrefix(source, ".") {
 		return filepath.Join(appPath, source)
 	}
 	// Named volume key: use top-level managed name if declared, otherwise service-scoped

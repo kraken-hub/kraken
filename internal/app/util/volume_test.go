@@ -302,6 +302,24 @@ func TestEnsureServiceVolumes(t *testing.T) {
 		}
 	})
 
+	t.Run("bind-mounting an existing file is not an error", func(t *testing.T) {
+		rt := &fakeRuntime{}
+		tk := newTestKraken(t, rt)
+		file := filepath.Join(t.TempDir(), ".dotfile")
+		if err := os.WriteFile(file, []byte("alias l=ls\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg := &runtime.ContainerOptions{
+			Volumes: []runtime.VolumeMount{{Source: file, Target: "/container/.dotfile"}},
+		}
+		if err := EnsureServiceVolumes(tk.Kraken, "myapp", "web", cfg); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if info, err := os.Stat(file); err != nil || info.IsDir() {
+			t.Errorf("file should be untouched, err=%v", err)
+		}
+	})
+
 	t.Run("skips anonymous volumes", func(t *testing.T) {
 		rt := &fakeRuntime{}
 		tk := newTestKraken(t, rt)
