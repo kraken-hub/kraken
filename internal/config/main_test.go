@@ -144,7 +144,7 @@ services:
 func TestPrepareYaml_EnvSection_TopLevelMergeThenScaleExpansion(t *testing.T) {
 	doc := `
 services:
-  app:
+  api:
     image: myapp
 ~prod:
   services:
@@ -160,7 +160,7 @@ services:
 	got := dumpToValue(t, node)
 	want := map[string]interface{}{
 		"services": map[string]interface{}{
-			"app":     map[string]interface{}{"image": "myapp"},
+			"api":     map[string]interface{}{"image": "myapp"},
 			"worker1": map[string]interface{}{"image": "workerimg"},
 			"worker2": map[string]interface{}{"image": "workerimg"},
 			"worker3": map[string]interface{}{"image": "workerimg"},
@@ -173,7 +173,7 @@ services:
 
 func TestPrepareYaml_EnvSection_TopLevelMergePreservesSourceOrder(t *testing.T) {
 	// ~prod is written before services: in the source, so its merged
-	// "cache"/"worker" entries should read before the pre-existing "app"
+	// "cache"/"worker" entries should read before the pre-existing "api"
 	// service, not after it.
 	doc := `
 ~prod:
@@ -184,7 +184,7 @@ func TestPrepareYaml_EnvSection_TopLevelMergePreservesSourceOrder(t *testing.T) 
       image: myapp
 
 services:
-  app:
+  api:
     image: myapp
 `
 	node := mustLoadNode(t, doc)
@@ -202,7 +202,7 @@ services:
     image: redis
   worker:
     image: myapp
-  app:
+  api:
     image: myapp
 `
 	if string(out) != want {
@@ -214,7 +214,7 @@ func TestPrepareYaml_EnvSection_HashDisambiguatorBothSidesOfServices(t *testing.
 	// "~prod#before" and "~prod#after" are distinct YAML keys (avoiding
 	// the duplicate-key parse error a plain repeated "~prod:" would cause)
 	// but both still match env "prod"; each merges its services on its own
-	// side of the pre-existing "app", preserving source order.
+	// side of the pre-existing "api", preserving source order.
 	doc := `
 ~prod#before:
   services:
@@ -222,7 +222,7 @@ func TestPrepareYaml_EnvSection_HashDisambiguatorBothSidesOfServices(t *testing.
       image: redis
 
 services:
-  app:
+  api:
     image: myapp
 
 ~prod#after:
@@ -244,7 +244,7 @@ services:
 services:
   cache:
     image: redis
-  app:
+  api:
     image: myapp
   worker1:
     image: myapp
@@ -259,7 +259,7 @@ services:
 func TestPrepareYaml_EnvSection_NonMatchingEnvDropsService(t *testing.T) {
 	doc := `
 services:
-  app:
+  api:
     image: myapp
 ~prod:
   services:
@@ -274,7 +274,7 @@ services:
 	got := dumpToValue(t, node)
 	want := map[string]interface{}{
 		"services": map[string]interface{}{
-			"app": map[string]interface{}{"image": "myapp"},
+			"api": map[string]interface{}{"image": "myapp"},
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -670,8 +670,8 @@ func TestPrepareYaml_Extends_InheritsPortsAndOverridesImage(t *testing.T) {
 	dir := t.TempDir()
 	basePath := writeTempYaml(t, dir, "base.yaml", `
 services:
-  php:
-    image: php-base
+  base-service:
+    image: base-image
     ports:
       - "9000:9000"
     labels:
@@ -683,7 +683,7 @@ services:
   web:
     extends:
       file: ` + basePath + `
-      service: php
+      service: base-service
     image: web-image
 `
 	node := mustLoadNode(t, doc)
@@ -709,8 +709,8 @@ func TestPrepareYaml_Extends_JSFunction(t *testing.T) {
 	dir := t.TempDir()
 	basePath := writeTempYaml(t, dir, "base.yaml", `
 services:
-  php:
-    image: php-base
+  base-service:
+    image: base-image
     ports:
       - "9000:9000"
 `)
@@ -720,7 +720,7 @@ services:
   web:
     extends:
       file: ` + basePath + `
-      service: php
+      service: base-service
       fn: !!js/function |
         ({ local, service }) => ({ ...service, ...local, merged: true })
     image: web-image
@@ -755,8 +755,8 @@ func TestPrepareYaml_Extends_ScaledBaseServiceReturnsError(t *testing.T) {
 	dir := t.TempDir()
 	basePath := writeTempYaml(t, dir, "base.yaml", `
 services:
-  php:
-    image: php-base
+  base-service:
+    image: base-image
     scale: 2
 `)
 
@@ -765,7 +765,7 @@ services:
   web:
     extends:
       file: ` + basePath + `
-      service: php
+      service: base-service
     image: web-image
 `
 	node := mustLoadNode(t, doc)
@@ -778,14 +778,14 @@ services:
 
 // TestPrepareYaml_Extends_ScaledBaseServiceByExpandedName verifies the
 // documented workaround: referencing a scaled base service's expanded
-// instance name (e.g. "php1") works, since that name legitimately exists
+// instance name (e.g. "base-service1") works, since that name legitimately exists
 // in the base file's services after its own scale expansion runs.
 func TestPrepareYaml_Extends_ScaledBaseServiceByExpandedName(t *testing.T) {
 	dir := t.TempDir()
 	basePath := writeTempYaml(t, dir, "base.yaml", `
 services:
-  php:
-    image: php-base
+  base-service:
+    image: base-image
     scale: 2
 `)
 
@@ -794,7 +794,7 @@ services:
   web:
     extends:
       file: ` + basePath + `
-      service: php1
+      service: base-service1
     image: web-image
 `
 	node := mustLoadNode(t, doc)
@@ -1048,5 +1048,224 @@ func TestLoadYamlFile_MissingFileReturnsError(t *testing.T) {
 	_, err := LoadYamlFile("/nonexistent/kraken.yaml", func(string) string { return "" })
 	if err == nil {
 		t.Fatalf("expected an error for a missing file")
+	}
+}
+
+// --- anchors defined in dropped sections ---
+
+// prepareAndReparse runs PrepareYaml, dumps the result and parses it again,
+// so a dangling alias in the dumped text surfaces as a failure.
+func prepareAndReparse(t *testing.T, doc, env string) interface{} {
+	t.Helper()
+	node := mustLoadNode(t, doc)
+	if err := PrepareYaml(node, env); err != nil {
+		t.Fatalf("PrepareYaml failed: %v", err)
+	}
+	out, err := yaml.Dump(node)
+	if err != nil {
+		t.Fatalf("yaml.Dump failed: %v", err)
+	}
+	reparsed, err := yaml.Load(out)
+	if err != nil {
+		t.Fatalf("reparse failed: %v\n%s", err, out)
+	}
+	return dumpToValue(t, reparsed)
+}
+
+func TestPrepareYaml_EnvSection_NestedAnchorInDroppedSectionIsRescued(t *testing.T) {
+	// The anchor sits two levels deep inside a ~test section that doesn't
+	// match the active env; both aliases must still receive its value.
+	doc := `
+~test:
+  env:
+    common: &COMMON
+      FOO: bar
+
+services:
+  api:
+    env: *COMMON
+  worker:
+    env: *COMMON
+`
+	got := prepareAndReparse(t, doc, "dev")
+	env := map[string]interface{}{"FOO": "bar"}
+	want := map[string]interface{}{
+		"services": map[string]interface{}{
+			"api":    map[string]interface{}{"env": env},
+			"worker": map[string]interface{}{"env": env},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestPrepareYaml_ExtensionKey_IsRemovedAndAnchorsResolve(t *testing.T) {
+	doc := `
+x-common: &COMMON
+  FOO: bar
+
+services:
+  api:
+    env: *COMMON
+  worker:
+    env: *COMMON
+`
+	got := prepareAndReparse(t, doc, "dev")
+	env := map[string]interface{}{"FOO": "bar"}
+	want := map[string]interface{}{
+		"services": map[string]interface{}{
+			"api":    map[string]interface{}{"env": env},
+			"worker": map[string]interface{}{"env": env},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestPrepareYaml_ExtensionKey_AliasSharedByExtend(t *testing.T) {
+	// worker's copied env is the same node as api's rescued &COMMON anchor;
+	// it must be aliased, not wrapped in a second anchor.
+	doc := `
+x-common: &COMMON
+    FOO: bar
+
+services:
+    api:
+        image: api
+        env: *COMMON
+    worker:
+        extend: api
+`
+	got := prepareAndReparse(t, doc, "dev")
+	svc := map[string]interface{}{"image": "api", "env": map[string]interface{}{"FOO": "bar"}}
+	want := map[string]interface{}{
+		"services": map[string]interface{}{
+			"api":    svc,
+			"worker": svc,
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestPrepareYaml_ExtensionKey_MergeKeyAlias(t *testing.T) {
+	doc := `
+x-common: &COMMON
+  FOO: bar
+
+services:
+  api:
+    env:
+      <<: *COMMON
+      EXTRA: "1"
+  worker:
+    env: *COMMON
+`
+	got := prepareAndReparse(t, doc, "dev")
+	want := map[string]interface{}{
+		"services": map[string]interface{}{
+			"api":    map[string]interface{}{"env": map[string]interface{}{"FOO": "bar", "EXTRA": "1"}},
+			"worker": map[string]interface{}{"env": map[string]interface{}{"FOO": "bar"}},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestPrepareYaml_ExtensionKey_ChainedAnchors(t *testing.T) {
+	// *BASE is only used inside x-derived, which is dropped too.
+	doc := `
+x-base: &BASE
+  FOO: bar
+
+x-derived: &DERIVED
+  <<: *BASE
+  BAZ: qux
+
+services:
+  api:
+    env: *DERIVED
+  worker:
+    env: *DERIVED
+`
+	got := prepareAndReparse(t, doc, "dev")
+	env := map[string]interface{}{"FOO": "bar", "BAZ": "qux"}
+	want := map[string]interface{}{
+		"services": map[string]interface{}{
+			"api":    map[string]interface{}{"env": env},
+			"worker": map[string]interface{}{"env": env},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestPrepareYaml_ExtensionKey_SequenceItemAlias(t *testing.T) {
+	doc := `
+x-item: &ITEM
+  name: foo
+  value: bar
+
+services:
+  api:
+    items:
+      - *ITEM
+  worker:
+    items:
+      - *ITEM
+`
+	got := prepareAndReparse(t, doc, "dev")
+	items := []interface{}{map[string]interface{}{"name": "foo", "value": "bar"}}
+	want := map[string]interface{}{
+		"services": map[string]interface{}{
+			"api":    map[string]interface{}{"items": items},
+			"worker": map[string]interface{}{"items": items},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestPrepareYaml_ExtensionKey_FromMatchingEnvSectionIsRemoved(t *testing.T) {
+	doc := `
+~prod:
+  x-common: &COMMON
+    FOO: bar
+
+services:
+  api:
+    image: api
+`
+	got := prepareAndReparse(t, doc, "prod")
+	want := map[string]interface{}{
+		"services": map[string]interface{}{
+			"api": map[string]interface{}{"image": "api"},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestPrepareYaml_ExtensionKey_OnlyTopLevel(t *testing.T) {
+	doc := `
+services:
+  x-api:
+    image: api
+`
+	got := prepareAndReparse(t, doc, "dev")
+	want := map[string]interface{}{
+		"services": map[string]interface{}{
+			"x-api": map[string]interface{}{"image": "api"},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
 	}
 }

@@ -79,6 +79,19 @@ func Resolve(ctx *Ctx, n ast.Node) ast.Node {
 	return n
 }
 
+// Anchors returns every AnchorNode found anywhere under n (n included), in
+// document order.
+func Anchors(n ast.Node) []*ast.AnchorNode {
+	if n == nil {
+		return nil
+	}
+	var result []*ast.AnchorNode
+	for _, a := range ast.Filter(ast.AnchorType, n) {
+		result = append(result, a.(*ast.AnchorNode))
+	}
+	return result
+}
+
 // IsAlias reports whether n is an (unresolved) alias reference node.
 func IsAlias(n ast.Node) bool {
 	_, ok := n.(*ast.AliasNode)
@@ -341,6 +354,28 @@ func needsColumnAlignment(n ast.Node) bool {
 		return true
 	}
 	return false
+}
+
+// MoveAnchorToPair relocates anchor to be the value of m.Values[idx],
+// realigning the anchored value to render nested under that pair's key.
+// The returned node is the anchor's (possibly cloned) aligned value.
+func MoveAnchorToPair(m *ast.MappingNode, idx int, anchor *ast.AnchorNode) ast.Node {
+	if needsColumnAlignment(anchor.Value) {
+		anchor.Value = AlignColumn(anchor.Value, Column(m.Values[idx].Key)+childIndentStep(m))
+	}
+	m.Values[idx].Value = anchor
+	return anchor.Value
+}
+
+// MoveAnchorToItem relocates anchor to be item idx of s, realigning the
+// anchored value to render at that item's column. The returned node is the
+// anchor's (possibly cloned) aligned value.
+func MoveAnchorToItem(s *ast.SequenceNode, idx int, anchor *ast.AnchorNode) ast.Node {
+	if needsColumnAlignment(anchor.Value) {
+		anchor.Value = AlignColumn(anchor.Value, Column(s.Values[idx]))
+	}
+	s.Values[idx] = anchor
+	return anchor.Value
 }
 
 // AppendPair appends newPair to m, aligning its key to match m's existing

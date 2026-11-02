@@ -550,9 +550,11 @@ func resolveVolumes(ctx *yaml.Ctx, node yaml.Node, appPath, appName, serviceName
 					Target: source,
 				})
 			} else {
+				target, readOnly := splitVolumeMode(yaml.ScalarText(val))
 				result = append(result, runtime.VolumeMount{
-					Source: resolveVolumeSrc(source, appPath, appName, serviceName, managedVolumes),
-					Target: yaml.ScalarText(val),
+					Source:   resolveVolumeSrc(source, appPath, appName, serviceName, managedVolumes),
+					Target:   target,
+					ReadOnly: readOnly,
 				})
 			}
 		}
@@ -571,15 +573,28 @@ func resolveVolumes(ctx *yaml.Ctx, node yaml.Node, appPath, appName, serviceName
 				})
 			} else {
 				source := val[:idx]
-				target := val[idx+1:]
+				target, readOnly := splitVolumeMode(val[idx+1:])
 				result = append(result, runtime.VolumeMount{
-					Source: resolveVolumeSrc(source, appPath, appName, serviceName, managedVolumes),
-					Target: target,
+					Source:   resolveVolumeSrc(source, appPath, appName, serviceName, managedVolumes),
+					Target:   target,
+					ReadOnly: readOnly,
 				})
 			}
 		}
 	}
 	return result
+}
+
+// splitVolumeMode strips a trailing ":ro"/":rw" access mode from a volume
+// target, reporting whether the mount is read-only.
+func splitVolumeMode(target string) (string, bool) {
+	if t, ok := strings.CutSuffix(target, ":ro"); ok {
+		return t, true
+	}
+	if t, ok := strings.CutSuffix(target, ":rw"); ok {
+		return t, false
+	}
+	return target, false
 }
 
 // resolveVolumeSrc resolves a volume source to a host path or managed volume name.

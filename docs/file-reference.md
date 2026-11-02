@@ -30,7 +30,7 @@ Keys prefixed with `~` are environment-scoped and merged only when the app envir
       scale: 5
 
 services:
-  app:
+  api:
     image: myapp
     ~dev,test:
       env:
@@ -41,7 +41,7 @@ services:
 
 The `~key` is a comma-separated list of environment names. For `dev,test` mode both `~dev` and `~dev,test` sections match. The matched section is merged into the parent and the `~key` is removed.
 
-For the example above, in `prod` mode the final config will include the `cache` and `worker` services, and `app` will have `restart: always`. Where a merged section lands relative to existing keys follows the source: `~prod` is written before `services:`, so `cache`/`worker` are merged in before `app`; a `~prod` block written after `services:` would instead merge its entries in after.
+For the example above, in `prod` mode the final config will include the `cache` and `worker` services, and `api` will have `restart: always`. Where a merged section lands relative to existing keys follows the source: `~prod` is written before `services:`, so `cache`/`worker` are merged in before `api`; a `~prod` block written after `services:` would instead merge its entries in after.
 
 To split prod-only additions into more than one block, YAML won't allow two `~prod:` keys at the same level — append `#<tag>` (e.g. `~prod#before`, `~prod#after`); anything from `#` onward is ignored when matching, it just makes the key unique.
 
@@ -52,7 +52,7 @@ To split prod-only additions into more than one block, YAML won't allow two `~pr
       image: redis
 
 services:
-  app:
+  api:
     image: myapp
 
 ~prod#after:
@@ -61,6 +61,29 @@ services:
       image: myapp
       scale: 2
 ```
+
+Anchors defined inside a `~env` section that doesn't match are still usable — aliases to them elsewhere in the file keep their value after the section is dropped.
+
+---
+
+## Extension fields
+
+Top-level keys starting with `x-` are removed before the config is used — they exist only to hold YAML anchors. They can be aliased directly, merged with `<<:`, and can alias each other.
+
+```yaml
+x-common-env: &COMMON_ENV
+  LOG_LEVEL: info
+
+services:
+  api:
+    env: *COMMON_ENV
+  worker:
+    env:
+      <<: *COMMON_ENV
+      QUEUE: default
+```
+
+Only top-level keys are treated this way; an `x-` key under `services:` is an ordinary service name. An `x-` key merged in from a matching top-level `~env` section is removed as well.
 
 ---
 
@@ -398,7 +421,10 @@ volumes:
   - /app/cache                  # anonymous volume
   - /opt/data:/var/lib/mysql    # absolute bind mount
   - ./cache:/tmp/cache          # relative to app directory
+  - ./conf:/etc/app:ro          # read-only
 ```
+
+A trailing `:ro` (read-only) or `:rw` (read-write, the default) on the target is accepted in both forms, e.g. `./run.sh: /usr/bin/run.sh:ro`.
 
 Resolution order for the source:
 1. Absolute path → used as-is (bind mount; host directory is created if it does not exist)
@@ -416,8 +442,8 @@ An existing host file or directory is mounted as-is, so single files can be bind
 
 ```yaml
 volumes_from:
-  - php                         # mounts volumes from the `php` service container
-  - php:ro                      # read-only
+  - data                        # mounts volumes from the `data` service container
+  - data:ro                     # read-only
   - container:mybox             # literal container name
   - container:mybox:ro
 ```
@@ -519,17 +545,17 @@ Inherit from a service in an external file. Unlike `extend`, `ports` **is** inhe
 ```yaml
 extends:
   file: ../base/kraken.yaml
-  service: php
+  service: base-service
 ```
 
-Scale expansion in the base file runs before the `service:` lookup, so if the referenced service has `scale: N`, it no longer exists under its original name — reference a specific replica by its expanded name instead (`service: php1`, `service: php2`, ...). Referencing the pre-expansion name of a scaled service returns an error.
+Scale expansion in the base file runs before the `service:` lookup, so if the referenced service has `scale: N`, it no longer exists under its original name — reference a specific replica by its expanded name instead (`service: base-service1`, `service: base-service2`, ...). Referencing the pre-expansion name of a scaled service returns an error.
 
 With JS merge function (same signature as `extend`):
 
 ```yaml
 extends:
   file: ../base/kraken.yaml
-  service: php
+  service: base-service
   fn: !!js/function |
     ({ local, service }) => ({ ...service, ...local })
 ```

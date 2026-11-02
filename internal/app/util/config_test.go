@@ -773,6 +773,54 @@ func TestResolveVolumes(t *testing.T) {
 			t.Errorf("got %#v, want 1 entry", got)
 		}
 	})
+
+	t.Run("mapping target with :ro is read-only", func(t *testing.T) {
+		node, ctx := mappingValue(t, "volumes:\n  ./file: /etc/file:ro\n", "volumes")
+		got := resolveVolumes(ctx, node, "/app", "myapp", "web", nil)
+		want := []runtime.VolumeMount{{Source: filepath.Join("/app", "file"), Target: "/etc/file", ReadOnly: true}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("sequence source:target:ro is read-only", func(t *testing.T) {
+		node, ctx := mappingValue(t, "volumes:\n  - ./data:/var/data:ro\n", "volumes")
+		got := resolveVolumes(ctx, node, "/app", "myapp", "web", nil)
+		want := []runtime.VolumeMount{{Source: filepath.Join("/app", "data"), Target: "/var/data", ReadOnly: true}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("sequence source:target:rw is writable", func(t *testing.T) {
+		node, ctx := mappingValue(t, "volumes:\n  - ./data:/var/data:rw\n", "volumes")
+		got := resolveVolumes(ctx, node, "/app", "myapp", "web", nil)
+		want := []runtime.VolumeMount{{Source: filepath.Join("/app", "data"), Target: "/var/data"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+	})
+}
+
+func TestSplitVolumeMode(t *testing.T) {
+	tests := []struct {
+		target       string
+		wantTarget   string
+		wantReadOnly bool
+	}{
+		{"/data", "/data", false},
+		{"/data:ro", "/data", true},
+		{"/data:rw", "/data", false},
+		{"/data:other", "/data:other", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.target, func(t *testing.T) {
+			gotTarget, gotReadOnly := splitVolumeMode(tt.target)
+			if gotTarget != tt.wantTarget || gotReadOnly != tt.wantReadOnly {
+				t.Errorf("splitVolumeMode(%q) = %q, %v; want %q, %v", tt.target, gotTarget, gotReadOnly, tt.wantTarget, tt.wantReadOnly)
+			}
+		})
+	}
 }
 
 func TestResolveVolumeSrc(t *testing.T) {

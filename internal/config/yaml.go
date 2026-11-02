@@ -36,11 +36,7 @@ func prepareEnvNode(ctx *yaml.Ctx, node yaml.Node, env string) {
 			if doAppend {
 				appendNode(ctx, m, envVal, index)
 			} else {
-				for _, pair := range yaml.MapPairs(ctx, envVal) {
-					if yaml.AnchorName(pair.Value) != "" {
-						replaceAnchorUsageNode(ctx, m, pair.Value)
-					}
-				}
+				rescueAnchors(ctx, m, envVal)
 			}
 		}
 
@@ -58,31 +54,74 @@ func prepareEnvNode(ctx *yaml.Ctx, node yaml.Node, env string) {
 	}
 }
 
+// rescueAnchors moves every anchor defined anywhere under dropped (a section
+// about to be removed: a non-matching ~env section or an x- key) onto its
+// first alias under node. Anchors are visited in reverse document order, so
+// an anchor whose only alias sits inside a later dropped anchor's value is
+// rescued after that value has itself been moved under node.
+func rescueAnchors(ctx *yaml.Ctx, node, dropped yaml.Node) {
+	anchors := yaml.Anchors(dropped)
+	for i := len(anchors) - 1; i >= 0; i-- {
+		replaceAnchorUsageNode(ctx, node, anchors[i])
+	}
+}
+
+// removeExtensionKeys drops every top-level key starting with "x-" (anchor-only
+// blocks), rescuing their anchors first.
+// Dropped values are rescued in reverse order, so an x- block aliasing an
+// earlier x- block works the same as anchors nested within one block.
+func removeExtensionKeys(ctx *yaml.Ctx, root *yaml.MappingNode) {
+	var dropped []yaml.Node
+	for i := 0; i < len(root.Values); {
+		if strings.HasPrefix(yaml.ScalarText(root.Values[i].Key), "x-") {
+			dropped = append(dropped, root.Values[i].Value)
+			yaml.RemovePair(root, i)
+			continue
+		}
+		i++
+	}
+	for i := len(dropped) - 1; i >= 0; i-- {
+		rescueAnchors(ctx, root, dropped[i])
+	}
+}
+
 // replaceAnchorUsageNode replaces, in place, the first alias reference to
 // anchor (an *yaml.AnchorNode wrapper, or anything Resolve()-equivalent to
-// one) found anywhere under node with the anchor's own inner value - used
-// to rescue an anchor's value before the section defining it is dropped (a
-// non-matching ~env section, or a consumed extend/extends directive).
+// one) found anywhere under node with the anchor itself, so any later alias
+// to it stays valid - used to rescue an anchor before the section defining
+// it is dropped (a non-matching ~env section, an x- key, or a consumed
+// extend/extends directive).
 func replaceAnchorUsageNode(ctx *yaml.Ctx, node yaml.Node, anchor yaml.Node) bool {
 	target := yaml.Resolve(ctx, anchor)
+	a, isAnchor := anchor.(*yaml.AnchorNode)
 	switch t := node.(type) {
+	case *yaml.AnchorNode:
+		return replaceAnchorUsageNode(ctx, t.Value, anchor)
 	case *yaml.MappingNode:
-		for _, mv := range t.Values {
+		for i, mv := range t.Values {
 			if isAliasTo(ctx, mv.Value, target) {
-				mv.Value = target
+				if isAnchor {
+					ctx.Anchors[yaml.AnchorName(a)] = yaml.MoveAnchorToPair(t, i, a)
+				} else {
+					mv.Value = anchor
+				}
 				return true
 			}
-			if replaceAnchorUsageNode(ctx, mv.Value, target) {
+			if replaceAnchorUsageNode(ctx, mv.Value, anchor) {
 				return true
 			}
 		}
 	case *yaml.SequenceNode:
 		for i, item := range t.Values {
 			if isAliasTo(ctx, item, target) {
-				t.Values[i] = target
+				if isAnchor {
+					ctx.Anchors[yaml.AnchorName(a)] = yaml.MoveAnchorToItem(t, i, a)
+				} else {
+					t.Values[i] = anchor
+				}
 				return true
 			}
-			if replaceAnchorUsageNode(ctx, item, target) {
+			if replaceAnchorUsageNode(ctx, item, anchor) {
 				return true
 			}
 		}
@@ -335,10 +374,13 @@ func addAnchors(root yaml.Node) {
 						mv.Value = yaml.NewAliasTo(anc)
 						continue
 					}
-					anc := yaml.NewAnchor(child, fmt.Sprintf("ref_%d", anchorSeq))
-					anchorSeq++
+					anc, ok := child.(*yaml.AnchorNode)
+					if !ok {
+						anc = yaml.NewAnchor(child, fmt.Sprintf("ref_%d", anchorSeq))
+						anchorSeq++
+						mv.Value = anc
+					}
 					anchored[child] = anc
-					mv.Value = anc
 				}
 				replacePass(child)
 			}
@@ -349,10 +391,13 @@ func addAnchors(root yaml.Node) {
 						t.Values[i] = yaml.NewAliasTo(anc)
 						continue
 					}
-					anc := yaml.NewAnchor(item, fmt.Sprintf("ref_%d", anchorSeq))
-					anchorSeq++
+					anc, ok := item.(*yaml.AnchorNode)
+					if !ok {
+						anc = yaml.NewAnchor(item, fmt.Sprintf("ref_%d", anchorSeq))
+						anchorSeq++
+						t.Values[i] = anc
+					}
 					anchored[item] = anc
-					t.Values[i] = anc
 				}
 				replacePass(item)
 			}

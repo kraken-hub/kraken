@@ -49,6 +49,10 @@ func PrepareYaml(node yaml.Node, env string) error {
 		return nil
 	}
 
+	// Runs after ~env processing, so x- keys merged in from a matching ~env
+	// section are stripped too.
+	removeExtensionKeys(ctx, rootNode)
+
 	_, servicesVal := yaml.FindValue(ctx, rootNode, "services")
 	services, _ := yaml.Resolve(ctx, servicesVal).(*yaml.MappingNode)
 
