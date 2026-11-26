@@ -21,7 +21,8 @@
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `KRAKEN_APP` | cwd directory name | Default application name when no `[app]` argument is given. |
-| `KRAKEN_ENV` | `dev` | Default environment used when registering an app (`kraken init`) and no `--env` flag is given. |
+| `KRAKEN_ENV` | `dev` | Default environment used when registering an app (`kraken init`, `kraken start --init`) and no `--env` flag is given. |
+| `KRAKEN_PROFILE` | — | Default [profile(s)](file-reference.md#profiles) stored when registering an app (`kraken init`, `kraken start --init`) and no `--profile` flag is given, comma-separated (`debug,mail`, `*` for all). |
 | `KRAKEN_SHELL` | `/bin/sh` | Shell used for interactive `run` and `exec` when no command is specified. |
 
 ## Output

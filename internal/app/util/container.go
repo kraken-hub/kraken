@@ -12,9 +12,25 @@ import (
 	"github.com/kraken-hub/kraken/internal/store"
 )
 
+// CreateOptions controls CreateContainers.
+type CreateOptions struct {
+	// Start starts the containers after creating them (existing ones are started too).
+	Start bool
+	// Profiles are the active profiles; "*" activates all of them. When empty, the
+	// app's stored profile (init --profile, config:context) is used.
+	Profiles []string
+	// Existing names services whose containers existed before (rebuild). Only used
+	// when no profiles are active.
+	Existing map[string]bool
+}
+
 // CreateContainers creates (and optionally starts) containers for an app.
-// serviceFilter limits the operation to a single service when non-empty.
-func CreateContainers(kraken *app.Kraken, appName, serviceFilter string, startAfter bool) error {
+// serviceFilter limits the operation to a single service when non-empty; a named
+// service is always included. Without a filter, services without profiles are
+// always included; a service with profiles is included when one of its profiles
+// is active — or, when no profiles are active at all (neither given nor stored),
+// when its container exists (or is listed in opts.Existing).
+func CreateContainers(kraken *app.Kraken, appName, serviceFilter string, opts CreateOptions) error {
 	appEntry, err := store.LoadApp(appName)
 	if err != nil {
 		return fmt.Errorf("app %q not found (run 'init' first)", appName)
@@ -23,6 +39,10 @@ func CreateContainers(kraken *app.Kraken, appName, serviceFilter string, startAf
 	services, err := LoadServices(appEntry)
 	if err != nil {
 		return err
+	}
+
+	if len(opts.Profiles) == 0 {
+		opts.Profiles = SplitList(appEntry.Value.Profile)
 	}
 
 	dockerVolumes, err := EnsureVolumes(kraken, appName, appEntry)
@@ -35,6 +55,11 @@ func CreateContainers(kraken *app.Kraken, appName, serviceFilter string, startAf
 		return err
 	}
 
+	appNetworks, err := EnsureAppNetworks(kraken, appName, appEntry)
+	if err != nil {
+		return err
+	}
+
 	rt := kraken.Runtime()
 	ctx := kraken.Context()
 	log := kraken.Logger()
@@ -43,6 +68,20 @@ func CreateContainers(kraken *app.Kraken, appName, serviceFilter string, startAf
 		serviceName, serviceNode := svc.Name, svc.Node
 		if serviceFilter != "" && serviceName != serviceFilter {
 			continue
+		}
+		if serviceFilter == "" && !ProfileActive(ServiceProfiles(svc.Ctx, serviceNode), opts.Profiles) {
+			if len(opts.Profiles) > 0 {
+				continue
+			}
+			if !opts.Existing[serviceName] {
+				exists, err := rt.ContainerExists(ctx, ContainerName(appName, serviceName))
+				if err != nil {
+					return err
+				}
+				if !exists {
+					continue
+				}
+			}
 		}
 
 		containerCfg := NodeToContainerOptions(appName, serviceName, serviceNode, svc.Ctx, appEntry.Value.Path, dockerVolumes)
@@ -73,7 +112,7 @@ func CreateContainers(kraken *app.Kraken, appName, serviceFilter string, startAf
 						instanceCfg.Name, LabelApp, appName, LabelService, serviceName)
 				}
 				log.Warn("Container `%s` already exists, skipping create", instanceCfg.Name)
-				if startAfter {
+				if opts.Start {
 					log.Info("Starting `%s` container.", instanceCfg.Name)
 					if err := rt.ContainerStart(ctx, instanceCfg.Name); err != nil {
 						log.Warn("Warning starting `%s`: %v", instanceCfg.Name, err)
@@ -88,8 +127,15 @@ func CreateContainers(kraken *app.Kraken, appName, serviceFilter string, startAf
 				return err
 			}
 
-			instanceCfg.DNS = ResolveDNS(kraken, instanceCfg.DNS)
-			instanceCfg.ExtraHosts = ResolveExtraHosts(kraken, instanceCfg.ExtraHosts)
+			if err := PrepareNetworkMode(kraken, appName, &instanceCfg); err != nil {
+				return err
+			}
+			if err := ResolveNetworkAttachments(&instanceCfg, appNetworks); err != nil {
+				return err
+			}
+
+			instanceCfg.DNS = ResolveDNS(kraken, appName, instanceCfg.DNS)
+			instanceCfg.ExtraHosts = ResolveExtraHosts(kraken, appName, instanceCfg.ExtraHosts)
 
 			log.Info("Creating `%s` container.", instanceCfg.Name)
 			containerID, err := rt.ContainerCreate(ctx, &instanceCfg)
@@ -97,16 +143,13 @@ func CreateContainers(kraken *app.Kraken, appName, serviceFilter string, startAf
 				return fmt.Errorf("create %q: %w", instanceCfg.Name, err)
 			}
 
-			if err := rt.NetworkConnect(ctx, globalNetworkID, containerID, instanceCfg.Name); err != nil {
-				return fmt.Errorf("network connect %q to %s: %w", instanceCfg.Name, GlobalNetwork, err)
-			}
-			if err := rt.NetworkConnect(ctx, appNetworkID, containerID, serviceName); err != nil {
-				return fmt.Errorf("network connect %q to %s: %w", instanceCfg.Name, AppNetwork(appName), err)
+			if err := ConnectNetworks(kraken, appName, serviceName, containerID, &instanceCfg, globalNetworkID, appNetworkID); err != nil {
+				return err
 			}
 
 			log.Info("Container `%s` created.", instanceCfg.Name)
 
-			if startAfter {
+			if opts.Start {
 				log.Info("Starting `%s` container.", instanceCfg.Name)
 				if err := rt.ContainerStart(ctx, containerID); err != nil {
 					return fmt.Errorf("start %q: %w", instanceCfg.Name, err)
@@ -197,6 +240,22 @@ func StartContainers(kraken *app.Kraken, appName, serviceFilter string) error {
 	return nil
 }
 
+// ExistingServices returns the services of an app that currently have a
+// container (running or not), by the kraken.service label.
+func ExistingServices(kraken *app.Kraken, appName string) (map[string]bool, error) {
+	containers, err := kraken.Runtime().ContainerList(kraken.Context(), true, AppLabels(appName))
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]bool{}
+	for _, c := range containers {
+		if svc := c.Labels[LabelService]; svc != "" {
+			result[svc] = true
+		}
+	}
+	return result, nil
+}
+
 // StopContainers stops running containers for an app/service.
 func StopContainers(kraken *app.Kraken, appName, serviceFilter string, timeout *time.Duration) error {
 	rt := kraken.Runtime()
@@ -282,9 +341,26 @@ func RemoveImages(kraken *app.Kraken, appName, serviceFilter string) error {
 	return nil
 }
 
-// ResolveDNS resolves "container:name" entries in a dns: list to their IP address.
-// Static IP entries are passed through unchanged.
-func ResolveDNS(kraken *app.Kraken, servers []string) []string {
+// ResolveContainerRef resolves a container reference: `service:<name>` is the
+// container of service <name> in appName, `container:<name>` is the literal
+// container name. ok is false when ref is neither form.
+func ResolveContainerRef(appName, ref string) (name string, ok bool) {
+	kind, target, found := strings.Cut(ref, ":")
+	if !found {
+		return "", false
+	}
+	switch kind {
+	case "service":
+		return ContainerName(appName, target), true
+	case "container":
+		return target, true
+	}
+	return "", false
+}
+
+// ResolveDNS resolves "service:name" / "container:name" entries in a dns: list
+// to their IP address. Static IP entries are passed through unchanged.
+func ResolveDNS(kraken *app.Kraken, appName string, servers []string) []string {
 	if len(servers) == 0 {
 		return servers
 	}
@@ -293,25 +369,25 @@ func ResolveDNS(kraken *app.Kraken, servers []string) []string {
 	log := kraken.Logger()
 	result := make([]string, 0, len(servers))
 	for _, s := range servers {
-		parts := strings.SplitN(s, ":", 2)
-		if len(parts) == 2 && parts[0] == "container" {
-			ip, err := rt.ContainerNetworkIP(ctx, parts[1], GlobalNetwork)
-			if err != nil || ip == "" {
-				log.Warn("Warning: could not resolve dns container IP for %q: %v", parts[1], err)
-				continue
-			}
-			result = append(result, ip)
-		} else {
+		name, ok := ResolveContainerRef(appName, s)
+		if !ok {
 			result = append(result, s)
+			continue
 		}
+		ip, err := rt.ContainerNetworkIP(ctx, name, GlobalNetwork)
+		if err != nil || ip == "" {
+			log.Warn("Warning: could not resolve dns container IP for %q: %v", name, err)
+			continue
+		}
+		result = append(result, ip)
 	}
 	return result
 }
 
-// ResolveExtraHosts resolves "hostname:container:name" entries to "hostname:ip"
-// by looking up the container's IP on the global kraken network.
-// Static "hostname:ip" entries are passed through unchanged.
-func ResolveExtraHosts(kraken *app.Kraken, hosts []string) []string {
+// ResolveExtraHosts resolves "hostname:service:name" / "hostname:container:name"
+// entries to "hostname:ip" by looking up the container's IP on the global kraken
+// network. Static "hostname:ip" entries are passed through unchanged.
+func ResolveExtraHosts(kraken *app.Kraken, appName string, hosts []string) []string {
 	if len(hosts) == 0 {
 		return hosts
 	}
@@ -320,17 +396,18 @@ func ResolveExtraHosts(kraken *app.Kraken, hosts []string) []string {
 	log := kraken.Logger()
 	result := make([]string, 0, len(hosts))
 	for _, h := range hosts {
-		parts := strings.SplitN(h, ":", 3)
-		if len(parts) == 3 && parts[1] == "container" {
-			ip, err := rt.ContainerNetworkIP(ctx, parts[2], GlobalNetwork)
-			if err != nil || ip == "" {
-				log.Warn("Warning: could not resolve extra_host container IP for %q: %v", parts[2], err)
-				continue
-			}
-			result = append(result, parts[0]+":"+ip)
-		} else {
+		hostname, ref, _ := strings.Cut(h, ":")
+		name, ok := ResolveContainerRef(appName, ref)
+		if !ok {
 			result = append(result, h)
+			continue
 		}
+		ip, err := rt.ContainerNetworkIP(ctx, name, GlobalNetwork)
+		if err != nil || ip == "" {
+			log.Warn("Warning: could not resolve extra_host container IP for %q: %v", name, err)
+			continue
+		}
+		result = append(result, hostname+":"+ip)
 	}
 	return result
 }

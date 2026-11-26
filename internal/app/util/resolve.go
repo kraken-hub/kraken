@@ -181,8 +181,9 @@ func ResolveAppName(args []string) (string, error) {
 
 // InitApp registers an application and processes its config snapshot.
 // appPath defaults to cwd; configFile defaults to kraken.yaml inside appPath;
-// env defaults to KRAKEN_ENV env var or "dev".
-func InitApp(appName, appPath, configFile, env string) (*store.App, error) {
+// env defaults to KRAKEN_ENV env var or "dev"; profile (comma-separated default
+// profiles for create/start/rebuild) defaults to KRAKEN_PROFILE env var or none.
+func InitApp(appName, appPath, configFile, env, profile string) (*store.App, error) {
 	if !validAppName.MatchString(appName) {
 		return nil, fmt.Errorf("app name %q includes invalid characters, only [a-z0-9-] are allowed", appName)
 	}
@@ -218,11 +219,17 @@ func InitApp(appName, appPath, configFile, env string) (*store.App, error) {
 		env = "dev"
 	}
 
+	if profile == "" {
+		profile = os.Getenv("KRAKEN_PROFILE")
+	}
+	profile = strings.Join(SplitList(profile), ",")
+
 	appEntry := &store.App{
 		Key: appName,
 		Value: store.AppValue{
-			Path: appPath,
-			Env:  env,
+			Path:    appPath,
+			Env:     env,
+			Profile: profile,
 			Config: store.AppConfig{
 				File: configFile,
 			},

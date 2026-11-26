@@ -15,10 +15,13 @@ import (
 
 func doInit(kraken *app.Kraken) {
 	var (
-		flagEnv            []string
 		flagDetach         bool
 		flagEntrypoint     string
+		flagEnv            []string
+		flagNetworks       []string
+		flagNetworkMode    string
 		flagNonInteractive bool
+		flagPublish        []string
 		flagWorkDir        string
 	)
 
@@ -28,6 +31,12 @@ func doInit(kraken *app.Kraken) {
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			appName, serviceName, err := util.ParseServiceRef(args)
+			if err != nil {
+				kraken.Logger().Fatal("%s", err)
+				os.Exit(2)
+			}
+
+			publishPorts, err := util.ParsePublishPorts(flagPublish)
 			if err != nil {
 				kraken.Logger().Fatal("%s", err)
 				os.Exit(2)
@@ -93,8 +102,6 @@ func doInit(kraken *app.Kraken) {
 				return err
 			}
 
-			containerCfg.DNS = util.ResolveDNS(kraken, containerCfg.DNS)
-			containerCfg.ExtraHosts = util.ResolveExtraHosts(kraken, containerCfg.ExtraHosts)
 			containerCfg.Labels = map[string]string{}
 
 			for _, e := range flagEnv {
@@ -116,7 +123,23 @@ func doInit(kraken *app.Kraken) {
 
 			containerCfg.Restart = ""
 			containerCfg.AutoRemove = true
-			containerCfg.Ports = nil
+			// Service ports belong to the service container; only explicitly published ports apply.
+			containerCfg.Ports = publishPorts
+			if cmd.Flags().Changed("network-mode") {
+				containerCfg.NetworkMode = flagNetworkMode
+			}
+			if len(publishPorts) > 0 && !util.UsesKrakenNetworks(containerCfg.NetworkMode) {
+				kraken.Logger().Fatal("--publish can't be used with network mode %q", containerCfg.NetworkMode)
+				os.Exit(2)
+			}
+			appNetworks, err := util.EnsureAppNetworks(kraken, appName, appEntry)
+			if err != nil {
+				return err
+			}
+			if err := util.ValidateExtraNetworks(kraken, appName, flagNetworks); err != nil {
+				kraken.Logger().Fatal("%s", err)
+				os.Exit(2)
+			}
 			containerCfg.Tty = tty
 			containerCfg.OpenStdin = tty
 			containerCfg.Cmd = cmdArgs
@@ -139,6 +162,23 @@ func doInit(kraken *app.Kraken) {
 				return err
 			}
 
+			if err := util.PrepareNetworkMode(kraken, appName, containerCfg); err != nil {
+				kraken.Logger().Fatal("%s", err)
+				os.Exit(2)
+			}
+			if err := util.ResolveNetworkAttachments(containerCfg, appNetworks); err != nil {
+				kraken.Logger().Fatal("%s", err)
+				os.Exit(2)
+			}
+			if len(flagNetworks) > 0 && !util.UsesKrakenNetworks(containerCfg.NetworkMode) {
+				kraken.Logger().Fatal("--network can't be used with network mode %q", containerCfg.NetworkMode)
+				os.Exit(2)
+			}
+			util.AppendExtraNetworks(containerCfg, flagNetworks)
+
+			containerCfg.DNS = util.ResolveDNS(kraken, appName, containerCfg.DNS)
+			containerCfg.ExtraHosts = util.ResolveExtraHosts(kraken, appName, containerCfg.ExtraHosts)
+
 			globalNetworkID, appNetworkID, err := util.EnsureNetworks(kraken, appName)
 			if err != nil {
 				return err
@@ -149,11 +189,8 @@ func doInit(kraken *app.Kraken) {
 				return fmt.Errorf("create: %w", err)
 			}
 
-			if err := rt.NetworkConnect(ctx, globalNetworkID, containerID, containerCfg.Name); err != nil {
-				return fmt.Errorf("network: %w", err)
-			}
-			if err := rt.NetworkConnect(ctx, appNetworkID, containerID, serviceName); err != nil {
-				return fmt.Errorf("network: %w", err)
+			if err := util.ConnectNetworks(kraken, appName, serviceName, containerID, containerCfg, globalNetworkID, appNetworkID); err != nil {
+				return err
 			}
 
 			if flagDetach {
@@ -186,10 +223,13 @@ func doInit(kraken *app.Kraken) {
 		}
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	cmd.Flags().StringArrayVarP(&flagEnv, "env", "e", nil, "Set environment variables")
 	cmd.Flags().BoolVarP(&flagDetach, "detach", "d", false, "Run in background")
 	cmd.Flags().StringVar(&flagEntrypoint, "entrypoint", "", "Override container entrypoint (\"\" to clear)")
+	cmd.Flags().StringArrayVarP(&flagEnv, "env", "e", nil, "Set environment variables")
+	cmd.Flags().StringArrayVar(&flagNetworks, "network", nil, "Join an extra network by its full name from \"docker network ls\" (repeatable)")
+	cmd.Flags().StringVar(&flagNetworkMode, "network-mode", "", "Network mode: bridge, host, none, container:<name>, service:<name> (default: service network_mode)")
 	cmd.Flags().BoolVar(&flagNonInteractive, "non-interactive", false, "Non-interactive mode")
+	cmd.Flags().StringArrayVarP(&flagPublish, "publish", "p", nil, "Publish a container port to the host ([ip:]hostPort:containerPort[/proto])")
 	cmd.Flags().StringVarP(&flagWorkDir, "workdir", "w", "", "Working directory inside the container")
 
 	kraken.RootCmd().AddCommand(cmd)

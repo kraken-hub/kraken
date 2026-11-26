@@ -2,7 +2,13 @@ package util
 
 import (
 	"context"
+	"errors"
+	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/kraken-hub/kraken/internal/runtime"
+	"github.com/kraken-hub/kraken/internal/store"
 )
 
 func TestEnsureNetworks(t *testing.T) {
@@ -12,9 +18,9 @@ func TestEnsureNetworks(t *testing.T) {
 			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) {
 				return false, "", nil
 			},
-			NetworkCreateFn: func(ctx context.Context, name string, labels map[string]string) (string, error) {
-				created = append(created, name)
-				return "id-" + name, nil
+			NetworkCreateFn: func(ctx context.Context, opts runtime.NetworkCreateOptions) (string, error) {
+				created = append(created, opts.Name)
+				return "id-" + opts.Name, nil
 			},
 		}
 		tk := newTestKraken(t, rt)
@@ -40,8 +46,8 @@ func TestEnsureNetworks(t *testing.T) {
 			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) {
 				return true, "existing-" + name, nil
 			},
-			NetworkCreateFn: func(ctx context.Context, name string, labels map[string]string) (string, error) {
-				t.Fatalf("NetworkCreate should not be called for %q", name)
+			NetworkCreateFn: func(ctx context.Context, opts runtime.NetworkCreateOptions) (string, error) {
+				t.Fatalf("NetworkCreate should not be called for %q", opts.Name)
 				return "", nil
 			},
 		}
@@ -74,7 +80,7 @@ func TestEnsureNetworks(t *testing.T) {
 			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) {
 				return false, "", nil
 			},
-			NetworkCreateFn: func(ctx context.Context, name string, labels map[string]string) (string, error) {
+			NetworkCreateFn: func(ctx context.Context, opts runtime.NetworkCreateOptions) (string, error) {
 				return "", context.DeadlineExceeded
 			},
 		}
@@ -86,53 +92,393 @@ func TestEnsureNetworks(t *testing.T) {
 	})
 }
 
-func TestRemoveNetwork(t *testing.T) {
-	t.Run("removes network when it exists", func(t *testing.T) {
-		var removedID string
+func TestUsesKrakenNetworks(t *testing.T) {
+	for mode, want := range map[string]bool{
+		"":            true,
+		"bridge":      true,
+		"host":        false,
+		"none":        false,
+		"container:x": false,
+		"service:x":   false,
+	} {
+		if got := UsesKrakenNetworks(mode); got != want {
+			t.Errorf("UsesKrakenNetworks(%q) = %v, want %v", mode, got, want)
+		}
+	}
+}
+
+func TestPrepareNetworkMode(t *testing.T) {
+	tests := []struct {
+		name         string
+		cfg          runtime.ContainerOptions
+		wantMode     string
+		wantPorts    bool
+		droppedPorts bool
+		wantErr      string
+	}{
+		{name: "default keeps ports", cfg: runtime.ContainerOptions{Ports: map[string]string{"80": "80/tcp"}}, wantMode: "", wantPorts: true},
+		{name: "bridge keeps ports", cfg: runtime.ContainerOptions{NetworkMode: "bridge", Ports: map[string]string{"80": "80/tcp"}}, wantMode: "bridge", wantPorts: true},
+		{name: "host drops ports", cfg: runtime.ContainerOptions{NetworkMode: "host", Ports: map[string]string{"80": "80/tcp"}}, wantMode: "host", droppedPorts: true},
+		{name: "none without ports", cfg: runtime.ContainerOptions{NetworkMode: "none"}, wantMode: "none"},
+		{name: "service resolved", cfg: runtime.ContainerOptions{NetworkMode: "service:db"}, wantMode: "container:db.myapp"},
+		{name: "container literal", cfg: runtime.ContainerOptions{NetworkMode: "container:vpn"}, wantMode: "container:vpn"},
+		{name: "container with conflicts", cfg: runtime.ContainerOptions{
+			NetworkMode: "service:db",
+			Ports:       map[string]string{"80": "80/tcp"},
+			Hostname:    "h",
+			DNS:         []string{"8.8.8.8"},
+			ExtraHosts:  []string{"a:1.2.3.4"},
+		}, wantErr: "ports, hostname, dns, extra_hosts"},
+		{name: "networks with host", cfg: runtime.ContainerOptions{NetworkMode: "host", Networks: []runtime.NetworkAttachment{{Name: "shared"}}}, wantErr: "can't be combined with networks"},
+		{name: "networks with bridge", cfg: runtime.ContainerOptions{NetworkMode: "bridge", Networks: []runtime.NetworkAttachment{{Name: "shared"}}}, wantMode: "bridge"},
+		{name: "missing name", cfg: runtime.ContainerOptions{NetworkMode: "service:"}, wantErr: "missing name"},
+		{name: "unsupported", cfg: runtime.ContainerOptions{NetworkMode: "mynet"}, wantErr: "unsupported"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			dropped, err := prepareNetworkMode("myapp", &cfg)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.NetworkMode != tt.wantMode {
+				t.Errorf("NetworkMode = %q, want %q", cfg.NetworkMode, tt.wantMode)
+			}
+			if (len(cfg.Ports) > 0) != tt.wantPorts {
+				t.Errorf("Ports = %#v, wantPorts %v", cfg.Ports, tt.wantPorts)
+			}
+			if dropped != tt.droppedPorts {
+				t.Errorf("droppedPorts = %v, want %v", dropped, tt.droppedPorts)
+			}
+		})
+	}
+}
+
+func appWithConfig(data string) *store.App {
+	return &store.App{Key: "myapp", Value: store.AppValue{Config: store.AppConfig{Data: data}}}
+}
+
+func TestEnsureAppNetworks(t *testing.T) {
+	t.Run("no networks section", func(t *testing.T) {
+		tk := newTestKraken(t, &fakeRuntime{})
+		got, err := EnsureAppNetworks(tk.Kraken, "myapp", appWithConfig("services:\n  api:\n    image: nginx\n"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("got %#v, want empty", got)
+		}
+	})
+
+	t.Run("creates app networks with settings and labels", func(t *testing.T) {
+		created := map[string]runtime.NetworkCreateOptions{}
+		rt := &fakeRuntime{
+			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) { return false, "", nil },
+			NetworkCreateFn: func(ctx context.Context, opts runtime.NetworkCreateOptions) (string, error) {
+				created[opts.Name] = opts
+				return "id", nil
+			},
+		}
+		tk := newTestKraken(t, rt)
+		got, err := EnsureAppNetworks(tk.Kraken, "myapp", appWithConfig(`networks:
+  plain:
+  backend:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-backend
+    internal: true
+    labels:
+      team: core
+      kraken.app: spoofed
+`))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := map[string]string{"plain": "kraken_net.myapp.plain", "backend": "kraken_net.myapp.backend"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+		plain := created["kraken_net.myapp.plain"]
+		if plain.Driver != "" || plain.Internal || !reflect.DeepEqual(plain.Labels, map[string]string{LabelApp: "myapp", LabelNetwork: "plain"}) {
+			t.Errorf("plain = %#v", plain)
+		}
+		backend := created["kraken_net.myapp.backend"]
+		wantBackend := runtime.NetworkCreateOptions{
+			Name:       "kraken_net.myapp.backend",
+			Driver:     "bridge",
+			DriverOpts: map[string]string{"com.docker.network.bridge.name": "br-backend"},
+			Internal:   true,
+			Labels:     map[string]string{LabelApp: "myapp", LabelNetwork: "backend", "team": "core"},
+		}
+		if !reflect.DeepEqual(backend, wantBackend) {
+			t.Errorf("backend = %#v, want %#v", backend, wantBackend)
+		}
+	})
+
+	t.Run("existing app network is not recreated", func(t *testing.T) {
+		rt := &fakeRuntime{
+			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) { return true, "id", nil },
+			NetworkCreateFn: func(ctx context.Context, opts runtime.NetworkCreateOptions) (string, error) {
+				t.Fatalf("NetworkCreate should not be called for %q", opts.Name)
+				return "", nil
+			},
+		}
+		tk := newTestKraken(t, rt)
+		if _, err := EnsureAppNetworks(tk.Kraken, "myapp", appWithConfig("networks:\n  backend:\n")); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("external networks keep their name", func(t *testing.T) {
+		var checked []string
 		rt := &fakeRuntime{
 			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) {
-				if name == "kraken_net.myapp" {
-					return true, "net-id-123", nil
-				}
-				return false, "", nil
+				checked = append(checked, name)
+				return true, "id", nil
 			},
-			NetworkRemoveFn: func(ctx context.Context, id string) error {
-				removedID = id
+		}
+		tk := newTestKraken(t, rt)
+		got, err := EnsureAppNetworks(tk.Kraken, "myapp", appWithConfig(`networks:
+  shared:
+    external: true
+  edge:
+    external: true
+    name: edge_net
+  legacy:
+    external:
+      name: old_net
+`))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := map[string]string{"shared": "shared", "edge": "edge_net", "legacy": "old_net"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("missing external network errors", func(t *testing.T) {
+		rt := &fakeRuntime{
+			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) { return false, "", nil },
+		}
+		tk := newTestKraken(t, rt)
+		_, err := EnsureAppNetworks(tk.Kraken, "myapp", appWithConfig("networks:\n  shared:\n    external: true\n"))
+		if err == nil || !strings.Contains(err.Error(), `external network "shared" does not exist`) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("default is reserved", func(t *testing.T) {
+		tk := newTestKraken(t, &fakeRuntime{})
+		_, err := EnsureAppNetworks(tk.Kraken, "myapp", appWithConfig("networks:\n  default:\n"))
+		if err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestResolveNetworkAttachments(t *testing.T) {
+	appNetworks := map[string]string{"backend": "kraken_net.myapp.backend", "shared": "shared"}
+
+	t.Run("maps names, keeps aliases, drops duplicates", func(t *testing.T) {
+		cfg := &runtime.ContainerOptions{Name: "api.myapp", Networks: []runtime.NetworkAttachment{
+			{Name: "backend", Aliases: []string{"api-internal"}},
+			{Name: "shared"},
+			{Name: "backend"},
+		}}
+		if err := ResolveNetworkAttachments(cfg, appNetworks); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []runtime.NetworkAttachment{
+			{Name: "kraken_net.myapp.backend", Aliases: []string{"api-internal"}},
+			{Name: "shared"},
+		}
+		if !reflect.DeepEqual(cfg.Networks, want) {
+			t.Errorf("got %#v, want %#v", cfg.Networks, want)
+		}
+	})
+
+	t.Run("undeclared network errors", func(t *testing.T) {
+		cfg := &runtime.ContainerOptions{Name: "api.myapp", Networks: []runtime.NetworkAttachment{{Name: "nope"}}}
+		err := ResolveNetworkAttachments(cfg, appNetworks)
+		if err == nil || !strings.Contains(err.Error(), `network "nope" of `+"`api.myapp`"+` is not declared`) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestValidateExtraNetworks(t *testing.T) {
+	rt := &fakeRuntime{
+		NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) {
+			return name == "shared" || name == "kraken_net.myapp.backend", "id", nil
+		},
+	}
+
+	t.Run("existing networks by full name", func(t *testing.T) {
+		tk := newTestKraken(t, rt)
+		if err := ValidateExtraNetworks(tk.Kraken, "myapp", []string{"shared", "kraken_net.myapp.backend"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("app network key is not a network name", func(t *testing.T) {
+		tk := newTestKraken(t, rt)
+		err := ValidateExtraNetworks(tk.Kraken, "myapp", []string{"backend"})
+		if err == nil || !strings.Contains(err.Error(), `network "backend" not found`) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	for _, name := range []string{"kraken_net", "kraken_net.myapp"} {
+		t.Run(name+" is joined by default", func(t *testing.T) {
+			tk := newTestKraken(t, rt)
+			err := ValidateExtraNetworks(tk.Kraken, "myapp", []string{name})
+			if err == nil || !strings.Contains(err.Error(), "joined by default") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+
+	for _, mode := range []string{"host", "none", "bridge", "service:db", "container:vpn"} {
+		t.Run("mode "+mode+" is rejected", func(t *testing.T) {
+			tk := newTestKraken(t, rt)
+			err := ValidateExtraNetworks(tk.Kraken, "myapp", []string{mode})
+			if err == nil || !strings.Contains(err.Error(), "use --network-mode") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+func TestAppendExtraNetworks(t *testing.T) {
+	cfg := &runtime.ContainerOptions{Networks: []runtime.NetworkAttachment{
+		{Name: "kraken_net.myapp.backend", Aliases: []string{"api-internal"}},
+	}}
+	AppendExtraNetworks(cfg, []string{"shared", "kraken_net.myapp.backend", "shared"})
+	want := []runtime.NetworkAttachment{
+		{Name: "kraken_net.myapp.backend", Aliases: []string{"api-internal"}},
+		{Name: "shared"},
+	}
+	if !reflect.DeepEqual(cfg.Networks, want) {
+		t.Errorf("got %#v, want %#v", cfg.Networks, want)
+	}
+}
+
+func TestConnectNetworks(t *testing.T) {
+	type connect struct {
+		network string
+		aliases []string
+	}
+
+	t.Run("kraken networks then extra networks", func(t *testing.T) {
+		var got []connect
+		rt := &fakeRuntime{
+			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, aliases ...string) error {
+				got = append(got, connect{networkID, aliases})
 				return nil
 			},
 		}
 		tk := newTestKraken(t, rt)
-
-		RemoveNetwork(tk.Kraken, "myapp")
-
-		if removedID != "net-id-123" {
-			t.Errorf("removedID = %q, want net-id-123", removedID)
+		cfg := &runtime.ContainerOptions{Name: "api.myapp", Networks: []runtime.NetworkAttachment{
+			{Name: "shared", Aliases: []string{"api.lh"}},
+			{Name: "kraken_net.myapp.backend"},
+		}}
+		if err := ConnectNetworks(tk.Kraken, "myapp", "api", "cid", cfg, "global-id", "app-id"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []connect{
+			{"global-id", []string{"api.myapp"}},
+			{"app-id", []string{"api"}},
+			{"shared", []string{"api.lh"}},
+			{"kraken_net.myapp.backend", nil},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
 		}
 	})
 
-	t.Run("does nothing when network does not exist", func(t *testing.T) {
+	t.Run("non-bridge mode connects nothing", func(t *testing.T) {
 		rt := &fakeRuntime{
-			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) {
-				return false, "", nil
+			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, aliases ...string) error {
+				t.Fatalf("NetworkConnect should not be called")
+				return nil
 			},
+		}
+		tk := newTestKraken(t, rt)
+		if err := ConnectNetworks(tk.Kraken, "myapp", "api", "cid", &runtime.ContainerOptions{NetworkMode: "host"}, "g", "a"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
+func TestRemoveNetworks(t *testing.T) {
+	t.Run("removes labelled networks and the app network once", func(t *testing.T) {
+		var listedLabels map[string]string
+		var removed []string
+		rt := &fakeRuntime{
+			NetworkListFn: func(ctx context.Context, labels map[string]string) ([]runtime.NetworkInfo, error) {
+				listedLabels = labels
+				return []runtime.NetworkInfo{
+					{ID: "app-id", Name: "kraken_net.myapp"},
+					{ID: "backend-id", Name: "kraken_net.myapp.backend"},
+				}, nil
+			},
+			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) {
+				return name == "kraken_net.myapp", "app-id", nil
+			},
+			NetworkRemoveFn: func(ctx context.Context, id string) error {
+				removed = append(removed, id)
+				return nil
+			},
+		}
+		tk := newTestKraken(t, rt)
+		RemoveNetworks(tk.Kraken, "myapp")
+		if !reflect.DeepEqual(listedLabels, map[string]string{LabelApp: "myapp"}) {
+			t.Errorf("listed labels = %#v", listedLabels)
+		}
+		if !reflect.DeepEqual(removed, []string{"app-id", "backend-id"}) {
+			t.Errorf("removed = %v", removed)
+		}
+	})
+
+	t.Run("list error still removes the app network by name", func(t *testing.T) {
+		var removed []string
+		rt := &fakeRuntime{
+			NetworkListFn: func(ctx context.Context, labels map[string]string) ([]runtime.NetworkInfo, error) {
+				return nil, errors.New("boom")
+			},
+			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) { return true, "app-id", nil },
+			NetworkRemoveFn: func(ctx context.Context, id string) error {
+				removed = append(removed, id)
+				return nil
+			},
+		}
+		tk := newTestKraken(t, rt)
+		RemoveNetworks(tk.Kraken, "myapp")
+		if !reflect.DeepEqual(removed, []string{"app-id"}) {
+			t.Errorf("removed = %v", removed)
+		}
+		if !strings.Contains(tk.stdout(), "Warning listing networks") {
+			t.Errorf("expected warning, stdout = %q", tk.stdout())
+		}
+	})
+
+	t.Run("nothing to remove", func(t *testing.T) {
+		rt := &fakeRuntime{
+			NetworkListFn:   func(ctx context.Context, labels map[string]string) ([]runtime.NetworkInfo, error) { return nil, nil },
+			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) { return false, "", nil },
 			NetworkRemoveFn: func(ctx context.Context, id string) error {
 				t.Fatal("NetworkRemove should not be called")
 				return nil
 			},
 		}
 		tk := newTestKraken(t, rt)
-
-		RemoveNetwork(tk.Kraken, "myapp")
-	})
-
-	t.Run("does nothing on NetworkExists error", func(t *testing.T) {
-		rt := &fakeRuntime{
-			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) {
-				return false, "", context.DeadlineExceeded
-			},
-		}
-		tk := newTestKraken(t, rt)
-
-		RemoveNetwork(tk.Kraken, "myapp")
+		RemoveNetworks(tk.Kraken, "myapp")
 	})
 }

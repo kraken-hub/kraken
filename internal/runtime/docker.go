@@ -668,15 +668,37 @@ func (r *DockerRuntime) ImageRemove(ctx context.Context, name string, force bool
 
 // ---- Networks ----
 
-func (r *DockerRuntime) NetworkCreate(ctx context.Context, name string, labels map[string]string) (string, error) {
-	resp, err := r.cli.NetworkCreate(ctx, name, network.CreateOptions{
-		Driver: "bridge",
-		Labels: labels,
+func (r *DockerRuntime) NetworkCreate(ctx context.Context, opts NetworkCreateOptions) (string, error) {
+	driver := opts.Driver
+	if driver == "" {
+		driver = "bridge"
+	}
+	resp, err := r.cli.NetworkCreate(ctx, opts.Name, network.CreateOptions{
+		Driver:   driver,
+		Options:  opts.DriverOpts,
+		Internal: opts.Internal,
+		Labels:   opts.Labels,
 	})
 	if err != nil {
-		return "", fmt.Errorf("create network %q: %w", name, err)
+		return "", fmt.Errorf("create network %q: %w", opts.Name, err)
 	}
 	return resp.ID, nil
+}
+
+func (r *DockerRuntime) NetworkList(ctx context.Context, labels map[string]string) ([]NetworkInfo, error) {
+	f := filters.NewArgs()
+	for k, v := range labels {
+		f.Add("label", k+"="+v)
+	}
+	nets, err := r.cli.NetworkList(ctx, network.ListOptions{Filters: f})
+	if err != nil {
+		return nil, err
+	}
+	result := make([]NetworkInfo, 0, len(nets))
+	for _, n := range nets {
+		result = append(result, NetworkInfo{ID: n.ID, Name: n.Name})
+	}
+	return result, nil
 }
 
 func (r *DockerRuntime) NetworkRemove(ctx context.Context, id string) error {

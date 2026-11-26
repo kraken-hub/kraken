@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -59,6 +60,15 @@ func LoadServices(appEntry *store.App) ([]ServiceEntry, error) {
 // Returns volumeName -> YAML node (may be nil for volumes with no config), plus the
 // Ctx needed to resolve any aliases within those nodes.
 func LoadVolumesSection(appEntry *store.App) (map[string]yaml.Node, *yaml.Ctx, error) {
+	return loadTopLevelSection(appEntry, "volumes")
+}
+
+// LoadNetworksSection returns the entries of the top-level networks: section.
+func LoadNetworksSection(appEntry *store.App) (map[string]yaml.Node, *yaml.Ctx, error) {
+	return loadTopLevelSection(appEntry, "networks")
+}
+
+func loadTopLevelSection(appEntry *store.App, key string) (map[string]yaml.Node, *yaml.Ctx, error) {
 	ctx := yaml.NewCtx()
 
 	data := appEntry.Value.Config.Data
@@ -75,13 +85,13 @@ func LoadVolumesSection(appEntry *store.App) (map[string]yaml.Node, *yaml.Ctx, e
 	}
 	ctx.Index(root)
 
-	_, volumesVal := yaml.FindValue(ctx, root, "volumes")
-	if volumesVal == nil {
+	_, sectionVal := yaml.FindValue(ctx, root, key)
+	if sectionVal == nil {
 		return map[string]yaml.Node{}, ctx, nil
 	}
 
 	result := map[string]yaml.Node{}
-	for _, mv := range yaml.MapPairs(ctx, volumesVal) {
+	for _, mv := range yaml.MapPairs(ctx, sectionVal) {
 		result[yaml.ScalarText(mv.Key)] = mv.Value
 	}
 	return result, ctx, nil
@@ -121,6 +131,10 @@ func NodeToContainerOptions(appName, serviceName string, node yaml.Node, ctx *ya
 			cfg.WorkDir = yaml.ScalarText(valueNode)
 		case "hostname":
 			cfg.Hostname = yaml.ScalarText(valueNode)
+		case "network_mode":
+			cfg.NetworkMode = yaml.ScalarText(valueNode)
+		case "networks":
+			cfg.Networks = parseServiceNetworks(ctx, valueNode)
 		case "entrypoint":
 			cfg.Entrypoint = parseScript(ctx, valueNode)
 		case "cmd":
@@ -636,24 +650,79 @@ func parsePorts(ctx *yaml.Ctx, node yaml.Node) map[string]string {
 		}
 	case *yaml.SequenceNode:
 		for _, item := range t.Values {
-			val := yaml.ScalarText(yaml.Resolve(ctx, item))
-			proto := "tcp"
-			if idx := strings.LastIndex(val, "/"); idx >= 0 {
-				proto = val[idx+1:]
-				val = val[:idx]
+			hostSpec, containerPort, err := ParsePortSpec(yaml.ScalarText(yaml.Resolve(ctx, item)))
+			if err != nil {
+				continue
 			}
-			parts := strings.Split(val, ":")
-			switch len(parts) {
-			case 1:
-				// containerPort only — expose but no host binding
-				result["0:"+parts[0]] = parts[0] + "/" + proto
-			case 2:
-				result[parts[0]] = parts[1] + "/" + proto
-			case 3:
-				// ip:hostPort:containerPort
-				result[parts[0]+":"+parts[1]] = parts[2] + "/" + proto
-			}
+			result[hostSpec] = containerPort
 		}
 	}
 	return result
+}
+
+// parseServiceNetworks parses a service's networks: list (`- name`) or mapping
+// (`name:` with optional `aliases:`) into network attachments, in document order.
+func parseServiceNetworks(ctx *yaml.Ctx, node yaml.Node) []runtime.NetworkAttachment {
+	var result []runtime.NetworkAttachment
+	switch t := yaml.Resolve(ctx, node).(type) {
+	case *yaml.SequenceNode:
+		for _, item := range t.Values {
+			if name := yaml.ScalarText(yaml.Resolve(ctx, item)); name != "" {
+				result = append(result, runtime.NetworkAttachment{Name: name})
+			}
+		}
+	case *yaml.MappingNode:
+		for _, mv := range t.Values {
+			att := runtime.NetworkAttachment{Name: yaml.ScalarText(mv.Key)}
+			if aliasesNode := findMappingKey(ctx, mv.Value, "aliases"); aliasesNode != nil {
+				for _, item := range yaml.SeqItems(ctx, aliasesNode) {
+					att.Aliases = append(att.Aliases, yaml.ScalarText(yaml.Resolve(ctx, item)))
+				}
+			}
+			result = append(result, att)
+		}
+	}
+	return result
+}
+
+// ParsePortSpec parses a port in `[[ip:]hostPort:]containerPort[/proto]` form
+// into a ContainerOptions.Ports entry (host spec → "containerPort/proto").
+// A bare containerPort yields the host spec "0:containerPort" (expose without binding).
+func ParsePortSpec(spec string) (hostSpec, containerPort string, err error) {
+	val := spec
+	proto := "tcp"
+	if idx := strings.LastIndex(val, "/"); idx >= 0 {
+		proto = val[idx+1:]
+		val = val[:idx]
+	}
+	parts := strings.Split(val, ":")
+	if proto == "" || slices.Contains(parts, "") {
+		return "", "", fmt.Errorf("invalid port %q", spec)
+	}
+	switch len(parts) {
+	case 1:
+		return "0:" + parts[0], parts[0] + "/" + proto, nil
+	case 2:
+		return parts[0], parts[1] + "/" + proto, nil
+	case 3:
+		return parts[0] + ":" + parts[1], parts[2] + "/" + proto, nil
+	}
+	return "", "", fmt.Errorf("invalid port %q", spec)
+}
+
+// ParsePublishPorts parses `run --publish` values. Unlike the YAML `ports:`
+// sequence form, an explicit host port is required: `[ip:]hostPort:containerPort[/proto]`.
+func ParsePublishPorts(specs []string) (map[string]string, error) {
+	result := map[string]string{}
+	for _, spec := range specs {
+		if !strings.Contains(spec, ":") {
+			return nil, fmt.Errorf("invalid port %q: expected [ip:]hostPort:containerPort[/proto]", spec)
+		}
+		hostSpec, containerPort, err := ParsePortSpec(spec)
+		if err != nil {
+			return nil, fmt.Errorf("%w: expected [ip:]hostPort:containerPort[/proto]", err)
+		}
+		result[hostSpec] = containerPort
+	}
+	return result, nil
 }

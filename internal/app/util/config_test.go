@@ -904,4 +904,108 @@ func TestParsePorts(t *testing.T) {
 			t.Errorf("got %#v, want %#v", got, want)
 		}
 	})
+
+	t.Run("sequence skips invalid entries", func(t *testing.T) {
+		node, ctx := mappingValue(t, "ports:\n  - \"1:2:3:4\"\n  - \":80\"\n  - \"8080:80\"\n", "ports")
+		got := parsePorts(ctx, node)
+		want := map[string]string{"8080": "80/tcp"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+	})
+}
+
+func TestParseServiceNetworks(t *testing.T) {
+	t.Run("sequence form", func(t *testing.T) {
+		node, ctx := mappingValue(t, "networks:\n  - backend\n  - shared\n", "networks")
+		got := parseServiceNetworks(ctx, node)
+		want := []runtime.NetworkAttachment{{Name: "backend"}, {Name: "shared"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("mapping form with aliases", func(t *testing.T) {
+		node, ctx := mappingValue(t, "networks:\n  shared:\n    aliases: [api.lh, api2.lh]\n  backend:\n", "networks")
+		got := parseServiceNetworks(ctx, node)
+		want := []runtime.NetworkAttachment{{Name: "shared", Aliases: []string{"api.lh", "api2.lh"}}, {Name: "backend"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+	})
+}
+
+func TestParsePortSpec(t *testing.T) {
+	tests := []struct {
+		spec          string
+		hostSpec      string
+		containerPort string
+		wantErr       bool
+	}{
+		{spec: "80", hostSpec: "0:80", containerPort: "80/tcp"},
+		{spec: "8080:80", hostSpec: "8080", containerPort: "80/tcp"},
+		{spec: "127.0.0.1:8080:80", hostSpec: "127.0.0.1:8080", containerPort: "80/tcp"},
+		{spec: "53:53/udp", hostSpec: "53", containerPort: "53/udp"},
+		{spec: "", wantErr: true},
+		{spec: ":80", wantErr: true},
+		{spec: "8080:", wantErr: true},
+		{spec: "80/", wantErr: true},
+		{spec: "1:2:3:4", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.spec, func(t *testing.T) {
+			hostSpec, containerPort, err := ParsePortSpec(tt.spec)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got %q -> %q", hostSpec, containerPort)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if hostSpec != tt.hostSpec || containerPort != tt.containerPort {
+				t.Errorf("got %q -> %q, want %q -> %q", hostSpec, containerPort, tt.hostSpec, tt.containerPort)
+			}
+		})
+	}
+}
+
+func TestParsePublishPorts(t *testing.T) {
+	t.Run("no flags yields empty map", func(t *testing.T) {
+		got, err := ParsePublishPorts(nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("got %#v, want empty", got)
+		}
+	})
+
+	t.Run("multiple specs", func(t *testing.T) {
+		got, err := ParsePublishPorts([]string{"3000:3000", "127.0.0.1:9229:9229", "5353:53/udp"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := map[string]string{
+			"3000":           "3000/tcp",
+			"127.0.0.1:9229": "9229/tcp",
+			"5353":           "53/udp",
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("bare container port is rejected", func(t *testing.T) {
+		if _, err := ParsePublishPorts([]string{"3000"}); err == nil {
+			t.Error("expected error for missing host port")
+		}
+	})
+
+	t.Run("malformed spec is rejected", func(t *testing.T) {
+		if _, err := ParsePublishPorts([]string{"8080:80", "1:2:3:4"}); err == nil {
+			t.Error("expected error for malformed spec")
+		}
+	})
 }

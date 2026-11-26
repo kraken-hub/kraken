@@ -260,6 +260,50 @@ Container hostname. Also registered as a network alias on the app network.
 
 ---
 
+### network_mode
+
+Selects the container's network stack. When unset (or `bridge`), the container is attached to the `kraken_net` and `kraken_net.{app}` networks as usual.
+
+```yaml
+network_mode: host            # use the host's network stack
+network_mode: none            # loopback only
+network_mode: service:vpn     # share the network stack of this app's `vpn` service container
+network_mode: container:vpn   # share the network stack of the container literally named `vpn`
+```
+
+With any mode other than `bridge`, the container is **not** attached to the kraken networks: other services can't reach it by service name, and `service:`/`container:` references to it in `dns`/`extra_hosts` won't resolve.
+
+- `host`, `none` — `ports` are ignored (with a warning).
+- `service:<name>`, `container:<name>` — the two containers share one IP and `localhost`. `ports`, `hostname`, `dns`, `dns_search`, `dns_opt` and `extra_hosts` belong to the shared stack and are an error on this service. The target container must exist when this one is created and be running when it starts, so define it earlier in the file. Recreating the target (`rebuild`) leaves this container without a network until it is recreated too.
+- Any mode other than `bridge` can't be combined with [`networks`](#networks).
+
+---
+
+### networks
+
+Extra networks the service joins, **in addition to** the default ones (`bridge`, `kraken_net`, `kraken_net.{app}`). Each must be declared in the [top-level `networks:`](#networks-top-level) section.
+
+Sequence form:
+
+```yaml
+networks:
+  - backend
+  - shared
+```
+
+Mapping form, with extra DNS names on that network:
+
+```yaml
+networks:
+  shared:
+    aliases: [api.example.lh]
+  backend:
+```
+
+On extra networks the container is resolvable by its container name (`api.my-app`) and its `aliases` — not by the bare service name, so services of different apps don't collide on a shared network.
+
+---
+
 ### env_file
 
 Load environment variables from one or more shell files. Supports variable expansion within the file.
@@ -349,29 +393,31 @@ ports:
 ```yaml
 extra_hosts:
   - mysql:10.0.0.5            # static ip
-  - redis:container:redis     # resolve container IP at create time
+  - redis:service:redis       # IP of this app's `redis` service container
+  - proxy:container:proxy     # IP of the container literally named `proxy`
 ```
 
-The `hostname:container:name` form looks up the IP of container `name` on the global `kraken_net` network, falling back to any network the container is attached to.
+The `hostname:service:name` and `hostname:container:name` forms resolve the container's IP at create time (see [Container references](#container-references)), looking it up on the global `kraken_net` network and falling back to any network the container is attached to.
 
 Entries support brace expansion — alternation and numeric ranges are expanded at parse time:
 
 ```yaml
 extra_hosts:
   - "{alpha,beta,gamma}.app.lh:container:proxy"
-  - "node{1..16}.app.lh:container:proxy"
+  - "node{1..16}.app.lh:service:proxy"
 ```
 
 ---
 
 ### dns
 
-Custom DNS servers for the container. Accepts static IPs or `container:<name>` to resolve a running container's IP at create time.
+Custom DNS servers for the container. Accepts static IPs, or a [container reference](#container-references) (`service:<name>` / `container:<name>`) to resolve a running container's IP at create time.
 
 ```yaml
 dns:
   - 8.8.8.8
-  - container:dns
+  - service:dns               # this app's `dns` service container
+  - container:dns-global      # the container literally named `dns-global`
 ```
 
 ---
@@ -562,6 +608,62 @@ extends:
 
 ---
 
+### profiles
+
+Makes a service optional. A service without `profiles` is always started; a service with profiles only when one of them is active.
+
+```yaml
+services:
+  api:
+    image: myapp                    # always
+  adminer:
+    image: adminer
+    profiles: [debug]               # only with the debug profile
+  mailer:
+    image: mailer
+    profiles: [debug, mail]         # with debug or mail
+```
+
+Activate profiles with `--profile` on `create`, `start` and `rebuild` (repeatable or comma-separated, `*` for all). Without the flag, the app's stored profile is used — set at registration (`kraken init --profile debug`, `kraken start --init "" --profile debug` when it registers the app, or the `KRAKEN_PROFILE` env var) and changed with `kraken config:context --add-profile mail` / `--remove-profile debug`.
+
+| Command | Optional services included |
+|---------|----------------------------|
+| `kraken start my-app` (no stored profile) | those whose container already exists |
+| `kraken rebuild my-app` (no stored profile) | those whose container existed before the rebuild |
+| `kraken start my-app` (stored profile `debug`) | exactly the `debug` services, same as `--profile debug` |
+| `kraken start my-app --profile debug` | exactly the `debug` services — existing containers of other profiles are not started |
+| `kraken rebuild my-app --profile mail` | exactly the `mail` services — other optional containers are removed and not recreated |
+| `kraken start adminer.my-app` | `adminer`, whatever its profiles (a service named explicitly is always included) |
+
+`stop`, `restart` and `remove` act on existing containers and ignore profiles.
+
+`run` ignores profiles too, so a service under a profile you never activate is a **run-only service**: it is never started by `start`/`create`/`rebuild`, but `kraken run` can use it. This is useful for tools and one-off tasks that need their own image, entrypoint, env or mounts:
+
+```yaml
+services:
+  api:
+    image: myapp
+  cli:
+    extend: api
+    profiles: [tools]
+    entrypoint: [bin/console]
+  db-client:
+    image: mysql:8
+    profiles: [tools]
+```
+
+```bash
+kraken run cli.my-app -- cache:clear                        # bin/console cache:clear
+kraken run cli.my-app --entrypoint "" -- sh                 # shell in the same setup
+kraken run db-client.my-app -- mysql -h mysql -u root -p
+```
+
+Arguments after `--` replace the service's `cmd`, so put a fixed command prefix in `entrypoint`, not `cmd`.
+
+It will still be started by `--profile '*'` (or a stored profile `*`), and by naming it explicitly (`kraken start cli.my-app`).
+
+---
+
 ### scale `experimental`
 
 ```yaml
@@ -569,6 +671,19 @@ scale: 3
 ```
 
 Expands the service into N numbered instances: `service1`, `service2`, `service3`. The value `1`, `false`, or omitted means no scaling. Supports variable substitution: `${WORKER_COUNT-1}`.
+
+---
+
+### Container references
+
+`network_mode`, `dns` and `extra_hosts` refer to other containers with a prefix:
+
+| Form | Refers to | Example (app `my-app`) |
+|------|-----------|------------------------|
+| `service:<name>` | the container of service `<name>` in the same app | `service:mysql` → `mysql.my-app` |
+| `container:<name>` | a container by its literal name (any app, or not managed by kraken) | `container:mysql.other-app` |
+
+`volumes_from` uses a bare service name instead (`- data`), with `container:<name>` for a literal container name.
 
 ---
 
@@ -597,6 +712,34 @@ volumes:
 ```
 
 Top-level volumes with `driver` or `driver_opts` are managed by kraken (created on start, removed on `remove --purge`). They are named `kraken_vol.{app}.{volName}` and carry labels `kraken.app` and `kraken.target` (YAML vol name). Volumes marked `external` are never created or removed by kraken. Volumes not listed here that are referenced in service `volumes:` are auto-created as managed volumes named `kraken_vol.{app}.{service}.{md5(path)}` with labels `kraken.app`, `kraken.service`, and `kraken.target` (original container path).
+
+---
+
+## Networks (top-level)
+
+Every container is always on Docker's default `bridge` network, the global `kraken_net` (where it is resolvable by container name, e.g. `mysql.my-app`) and the per-app `kraken_net.{app}` (resolvable by service name, e.g. `mysql`). Networks declared here are **extra** networks that services can join with [`networks`](#networks).
+
+```yaml
+networks:
+  backend:                          # app network (auto-created)
+
+  isolated:                         # app network with settings
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-isolated
+    internal: true                  # no outbound traffic
+    labels:
+      team: core
+
+  shared:                           # external network (must exist)
+    external: true
+
+  edge:                             # external network with explicit name
+    external: true
+    name: edge_net
+```
+
+App networks are named `kraken_net.{app}.{name}`, carry labels `kraken.app` and `kraken.network` (YAML network name), are created on start and removed (together with `kraken_net.{app}`) on `remove --purge`. Settings only apply when the network is created — change them on an existing network with `remove --purge` or by removing the network manually. Networks marked `external` are never created or removed by kraken; `external: {name: ...}` is accepted too. The name `default` is reserved.
 
 ---
 

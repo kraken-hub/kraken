@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -13,9 +14,10 @@ import (
 
 func doInit(kraken *app.Kraken) {
 	var (
-		flagEnv  string
-		flagFile string
-		flagPath string
+		flagEnv      string
+		flagFile     string
+		flagPath     string
+		flagProfiles []string
 	)
 
 	cmd := &cobra.Command{
@@ -41,12 +43,13 @@ func doInit(kraken *app.Kraken) {
 				name = args[0]
 			}
 
-			appEntry, err := util.InitApp(name, absPath, flagFile, flagEnv)
+			profile := strings.Join(util.SplitList(flagProfiles...), ",")
+			appEntry, err := util.InitApp(name, absPath, flagFile, flagEnv, profile)
 			if err != nil {
 				return err
 			}
 
-			kraken.Logger().Info("Application %q initialised (path: %s, env: %s, file: %s)", name, appEntry.Value.Path, appEntry.Value.Env, appEntry.Value.Config.File)
+			kraken.Logger().Info("Application %q initialised (path: %s, env: %s, profile: %s, file: %s)", name, appEntry.Value.Path, appEntry.Value.Env, appEntry.Value.Profile, appEntry.Value.Config.File)
 			return nil
 		},
 	}
@@ -54,6 +57,7 @@ func doInit(kraken *app.Kraken) {
 	cmd.Flags().StringVarP(&flagEnv, "env", "e", "", "Initial environment(s), comma-separated (env: KRAKEN_ENV, default: dev)")
 	cmd.Flags().StringVarP(&flagFile, "file", "f", "", "Config file to use (default: kraken.yaml)")
 	cmd.Flags().StringVarP(&flagPath, "path", "p", "", "Application directory (default: current directory)")
+	cmd.Flags().StringArrayVar(&flagProfiles, "profile", nil, "Default profile(s) for create, start and rebuild, comma-separated (env: KRAKEN_PROFILE)")
 
 	kraken.RootCmd().AddCommand(cmd)
 }

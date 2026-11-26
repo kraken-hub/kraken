@@ -51,7 +51,7 @@ func WaitWithDirective(kraken *app.Kraken, containerID, containerName string, de
 	var waitDur time.Duration
 	foundDirective := false
 
-	scanLoop:
+scanLoop:
 	for {
 		select {
 		case <-ctx.Done():

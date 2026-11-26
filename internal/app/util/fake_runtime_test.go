@@ -35,7 +35,8 @@ type fakeRuntime struct {
 	ImageExistsFn           func(ctx context.Context, image string) (bool, error)
 	ImageVolumesFn          func(ctx context.Context, image string) ([]string, error)
 	ImageRemoveFn           func(ctx context.Context, image string, force bool) error
-	NetworkCreateFn         func(ctx context.Context, name string, labels map[string]string) (string, error)
+	NetworkCreateFn         func(ctx context.Context, opts runtime.NetworkCreateOptions) (string, error)
+	NetworkListFn           func(ctx context.Context, labels map[string]string) ([]runtime.NetworkInfo, error)
 	NetworkRemoveFn         func(ctx context.Context, id string) error
 	NetworkExistsFn         func(ctx context.Context, name string) (bool, string, error)
 	NetworkConnectFn        func(ctx context.Context, networkID, containerID string, aliases ...string) error
@@ -186,11 +187,18 @@ func (f *fakeRuntime) ImageRemove(ctx context.Context, image string, force bool)
 	return f.ImageRemoveFn(ctx, image, force)
 }
 
-func (f *fakeRuntime) NetworkCreate(ctx context.Context, name string, labels map[string]string) (string, error) {
+func (f *fakeRuntime) NetworkCreate(ctx context.Context, opts runtime.NetworkCreateOptions) (string, error) {
 	if f.NetworkCreateFn == nil {
 		panic("NetworkCreate not implemented")
 	}
-	return f.NetworkCreateFn(ctx, name, labels)
+	return f.NetworkCreateFn(ctx, opts)
+}
+
+func (f *fakeRuntime) NetworkList(ctx context.Context, labels map[string]string) ([]runtime.NetworkInfo, error) {
+	if f.NetworkListFn == nil {
+		panic("NetworkList not implemented")
+	}
+	return f.NetworkListFn(ctx, labels)
 }
 
 func (f *fakeRuntime) NetworkRemove(ctx context.Context, id string) error {

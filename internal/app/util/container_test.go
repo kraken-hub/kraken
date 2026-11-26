@@ -3,6 +3,7 @@ package util
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"sort"
@@ -16,10 +17,34 @@ import (
 	"github.com/kraken-hub/kraken/internal/store"
 )
 
+func TestResolveContainerRef(t *testing.T) {
+	tests := []struct {
+		ref    string
+		name   string
+		wantOK bool
+	}{
+		{ref: "service:db", name: "db.myapp", wantOK: true},
+		{ref: "container:mybox", name: "mybox", wantOK: true},
+		{ref: "container:db.otherapp", name: "db.otherapp", wantOK: true},
+		{ref: "8.8.8.8"},
+		{ref: "10.0.0.5"},
+		{ref: "::1"},
+		{ref: "host"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.ref, func(t *testing.T) {
+			name, ok := ResolveContainerRef("myapp", tt.ref)
+			if ok != tt.wantOK || name != tt.name {
+				t.Errorf("got (%q, %v), want (%q, %v)", name, ok, tt.name, tt.wantOK)
+			}
+		})
+	}
+}
+
 func TestResolveDNS(t *testing.T) {
 	t.Run("empty input returns as-is", func(t *testing.T) {
 		tk := newTestKraken(t, &fakeRuntime{})
-		got := ResolveDNS(tk.Kraken, nil)
+		got := ResolveDNS(tk.Kraken, "myapp", nil)
 		if got != nil {
 			t.Errorf("got %#v, want nil", got)
 		}
@@ -27,7 +52,7 @@ func TestResolveDNS(t *testing.T) {
 
 	t.Run("static entries pass through unchanged", func(t *testing.T) {
 		tk := newTestKraken(t, &fakeRuntime{})
-		got := ResolveDNS(tk.Kraken, []string{"8.8.8.8", "1.1.1.1"})
+		got := ResolveDNS(tk.Kraken, "myapp", []string{"8.8.8.8", "1.1.1.1"})
 		want := []string{"8.8.8.8", "1.1.1.1"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("got %#v, want %#v", got, want)
@@ -44,7 +69,24 @@ func TestResolveDNS(t *testing.T) {
 			},
 		}
 		tk := newTestKraken(t, rt)
-		got := ResolveDNS(tk.Kraken, []string{"container:db.myapp", "8.8.8.8"})
+		got := ResolveDNS(tk.Kraken, "myapp", []string{"container:db.myapp", "8.8.8.8"})
+		want := []string{"10.0.0.5", "8.8.8.8"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("service reference resolved to the app's container IP", func(t *testing.T) {
+		rt := &fakeRuntime{
+			ContainerNetworkIPFn: func(ctx context.Context, nameOrID, networkName string) (string, error) {
+				if nameOrID == "db.myapp" && networkName == GlobalNetwork {
+					return "10.0.0.5", nil
+				}
+				return "", nil
+			},
+		}
+		tk := newTestKraken(t, rt)
+		got := ResolveDNS(tk.Kraken, "myapp", []string{"service:db", "8.8.8.8"})
 		want := []string{"10.0.0.5", "8.8.8.8"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("got %#v, want %#v", got, want)
@@ -58,7 +100,7 @@ func TestResolveDNS(t *testing.T) {
 			},
 		}
 		tk := newTestKraken(t, rt)
-		got := ResolveDNS(tk.Kraken, []string{"container:missing", "8.8.8.8"})
+		got := ResolveDNS(tk.Kraken, "myapp", []string{"container:missing", "8.8.8.8"})
 		want := []string{"8.8.8.8"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("got %#v, want %#v", got, want)
@@ -72,7 +114,7 @@ func TestResolveDNS(t *testing.T) {
 func TestResolveExtraHosts(t *testing.T) {
 	t.Run("empty input returns as-is", func(t *testing.T) {
 		tk := newTestKraken(t, &fakeRuntime{})
-		got := ResolveExtraHosts(tk.Kraken, nil)
+		got := ResolveExtraHosts(tk.Kraken, "myapp", nil)
 		if got != nil {
 			t.Errorf("got %#v, want nil", got)
 		}
@@ -80,7 +122,7 @@ func TestResolveExtraHosts(t *testing.T) {
 
 	t.Run("static hostname:ip entries pass through", func(t *testing.T) {
 		tk := newTestKraken(t, &fakeRuntime{})
-		got := ResolveExtraHosts(tk.Kraken, []string{"myhost:10.0.0.9"})
+		got := ResolveExtraHosts(tk.Kraken, "myapp", []string{"myhost:10.0.0.9"})
 		want := []string{"myhost:10.0.0.9"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("got %#v, want %#v", got, want)
@@ -97,8 +139,25 @@ func TestResolveExtraHosts(t *testing.T) {
 			},
 		}
 		tk := newTestKraken(t, rt)
-		got := ResolveExtraHosts(tk.Kraken, []string{"myhost:container:db.myapp"})
+		got := ResolveExtraHosts(tk.Kraken, "myapp", []string{"myhost:container:db.myapp"})
 		want := []string{"myhost:10.0.0.5"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("hostname:service:name resolved to the app's container IP", func(t *testing.T) {
+		rt := &fakeRuntime{
+			ContainerNetworkIPFn: func(ctx context.Context, nameOrID, networkName string) (string, error) {
+				if nameOrID == "db.myapp" && networkName == GlobalNetwork {
+					return "10.0.0.5", nil
+				}
+				return "", nil
+			},
+		}
+		tk := newTestKraken(t, rt)
+		got := ResolveExtraHosts(tk.Kraken, "myapp", []string{"myhost:service:db", "v6host:::1"})
+		want := []string{"myhost:10.0.0.5", "v6host:::1"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("got %#v, want %#v", got, want)
 		}
@@ -111,7 +170,7 @@ func TestResolveExtraHosts(t *testing.T) {
 			},
 		}
 		tk := newTestKraken(t, rt)
-		got := ResolveExtraHosts(tk.Kraken, []string{"myhost:container:missing", "static:1.2.3.4"})
+		got := ResolveExtraHosts(tk.Kraken, "myapp", []string{"myhost:container:missing", "static:1.2.3.4"})
 		want := []string{"static:1.2.3.4"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("got %#v, want %#v", got, want)
@@ -565,7 +624,7 @@ func TestCreateContainers(t *testing.T) {
 
 	t.Run("app not found errors", func(t *testing.T) {
 		tk := newTestKraken(t, &fakeRuntime{})
-		if err := CreateContainers(tk.Kraken, "nonexistent", "", false); err == nil {
+		if err := CreateContainers(tk.Kraken, "nonexistent", "", CreateOptions{}); err == nil {
 			t.Fatal("expected error")
 		}
 	})
@@ -599,11 +658,146 @@ func TestCreateContainers(t *testing.T) {
 			},
 		}
 		tk := newTestKraken(t, rt)
-		if err := CreateContainers(tk.Kraken, "createapp", "", false); err != nil {
+		if err := CreateContainers(tk.Kraken, "createapp", "", CreateOptions{}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if createdName != "web.createapp" {
 			t.Errorf("createdName = %q, want web.createapp", createdName)
+		}
+	})
+
+	t.Run("service networks are created and joined after the kraken networks", func(t *testing.T) {
+		appPath := t.TempDir()
+		if err := store.SaveApp(&store.App{
+			Key: "netsapp",
+			Value: store.AppValue{
+				Path: appPath,
+				Config: store.AppConfig{Data: "networks:\n  backend:\n  shared:\n    external: true\n" +
+					"services:\n  api:\n    image: nginx\n    networks:\n      shared:\n        aliases: [api.lh]\n      backend:\n"},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		var createdNets, connected []string
+		rt := &fakeRuntime{
+			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) {
+				if name == "kraken_net.netsapp.backend" {
+					return false, "", nil
+				}
+				return true, "id-" + name, nil
+			},
+			NetworkCreateFn: func(ctx context.Context, opts runtime.NetworkCreateOptions) (string, error) {
+				createdNets = append(createdNets, opts.Name)
+				return "id-" + opts.Name, nil
+			},
+			ImageExistsFn:     func(ctx context.Context, image string) (bool, error) { return true, nil },
+			ImageVolumesFn:    func(ctx context.Context, image string) ([]string, error) { return nil, nil },
+			ContainerExistsFn: func(ctx context.Context, nameOrID string) (bool, error) { return false, nil },
+			ContainerCreateFn: func(ctx context.Context, cfg *runtime.ContainerOptions) (string, error) {
+				return "cid", nil
+			},
+			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, aliases ...string) error {
+				connected = append(connected, networkID+"="+strings.Join(aliases, ","))
+				return nil
+			},
+		}
+		tk := newTestKraken(t, rt)
+		if err := CreateContainers(tk.Kraken, "netsapp", "", CreateOptions{}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflect.DeepEqual(createdNets, []string{"kraken_net.netsapp.backend"}) {
+			t.Errorf("created networks = %v", createdNets)
+		}
+		wantConnected := []string{
+			"id-kraken_net=api.netsapp",
+			"id-kraken_net.netsapp=api",
+			"shared=api.lh",
+			"kraken_net.netsapp.backend=",
+		}
+		if !reflect.DeepEqual(connected, wantConnected) {
+			t.Errorf("connected = %v, want %v", connected, wantConnected)
+		}
+	})
+
+	t.Run("undeclared service network errors before create", func(t *testing.T) {
+		appPath := t.TempDir()
+		if err := store.SaveApp(&store.App{
+			Key: "netsapp2",
+			Value: store.AppValue{
+				Path:   appPath,
+				Config: store.AppConfig{Data: "services:\n  api:\n    image: nginx\n    networks:\n      - nope\n"},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		rt := &fakeRuntime{
+			NetworkExistsFn:   func(ctx context.Context, name string) (bool, string, error) { return true, "id-" + name, nil },
+			ImageExistsFn:     func(ctx context.Context, image string) (bool, error) { return true, nil },
+			ImageVolumesFn:    func(ctx context.Context, image string) ([]string, error) { return nil, nil },
+			ContainerExistsFn: func(ctx context.Context, nameOrID string) (bool, error) { return false, nil },
+			ContainerCreateFn: func(ctx context.Context, cfg *runtime.ContainerOptions) (string, error) {
+				t.Fatal("ContainerCreate should not be called")
+				return "", nil
+			},
+		}
+		tk := newTestKraken(t, rt)
+		err := CreateContainers(tk.Kraken, "netsapp2", "", CreateOptions{})
+		if err == nil || !strings.Contains(err.Error(), "not declared") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("network_mode skips kraken networks and resolves service ref", func(t *testing.T) {
+		appPath := t.TempDir()
+		if err := store.SaveApp(&store.App{
+			Key: "netmodeapp",
+			Value: store.AppValue{
+				Path: appPath,
+				Config: store.AppConfig{Data: "services:\n" +
+					"  web:\n    image: nginx\n    network_mode: host\n    ports:\n      - \"8080:80\"\n" +
+					"  sidecar:\n    image: busybox\n    network_mode: service:web\n"},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		modes := map[string]string{}
+		var hostPorts map[string]string
+		var connects int
+		rt := &fakeRuntime{
+			NetworkExistsFn:   func(ctx context.Context, name string) (bool, string, error) { return true, "net-" + name, nil },
+			ImageExistsFn:     func(ctx context.Context, image string) (bool, error) { return true, nil },
+			ImageVolumesFn:    func(ctx context.Context, image string) ([]string, error) { return nil, nil },
+			ContainerExistsFn: func(ctx context.Context, nameOrID string) (bool, error) { return false, nil },
+			ContainerCreateFn: func(ctx context.Context, cfg *runtime.ContainerOptions) (string, error) {
+				modes[cfg.Name] = cfg.NetworkMode
+				if cfg.Name == "web.netmodeapp" {
+					hostPorts = cfg.Ports
+				}
+				return "id-" + cfg.Name, nil
+			},
+			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, aliases ...string) error {
+				connects++
+				return nil
+			},
+		}
+		tk := newTestKraken(t, rt)
+		if err := CreateContainers(tk.Kraken, "netmodeapp", "", CreateOptions{}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := map[string]string{"web.netmodeapp": "host", "sidecar.netmodeapp": "container:web.netmodeapp"}
+		if !reflect.DeepEqual(modes, want) {
+			t.Errorf("network modes = %#v, want %#v", modes, want)
+		}
+		if len(hostPorts) != 0 {
+			t.Errorf("host mode ports = %#v, want none", hostPorts)
+		}
+		if !strings.Contains(tk.stdout(), "Ports of `web.netmodeapp` are ignored") {
+			t.Errorf("expected ports warning, stdout = %q", tk.stdout())
+		}
+		if connects != 0 {
+			t.Errorf("NetworkConnect called %d times, want 0", connects)
 		}
 	})
 
@@ -636,7 +830,7 @@ func TestCreateContainers(t *testing.T) {
 			},
 		}
 		tk := newTestKraken(t, rt)
-		if err := CreateContainers(tk.Kraken, "createapp2", "", true); err != nil {
+		if err := CreateContainers(tk.Kraken, "createapp2", "", CreateOptions{Start: true}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if !started {
@@ -673,7 +867,7 @@ func TestCreateContainers(t *testing.T) {
 			},
 		}
 		tk := newTestKraken(t, rt)
-		err := CreateContainers(tk.Kraken, "createapp4", "", true)
+		err := CreateContainers(tk.Kraken, "createapp4", "", CreateOptions{Start: true})
 		if err == nil || !strings.Contains(err.Error(), "not managed by kraken") {
 			t.Fatalf("err = %v, want 'not managed by kraken' error", err)
 		}
@@ -711,7 +905,7 @@ func TestCreateContainers(t *testing.T) {
 			},
 		}
 		tk := newTestKraken(t, rt)
-		if err := CreateContainers(tk.Kraken, "createapp3", "db", false); err != nil {
+		if err := CreateContainers(tk.Kraken, "createapp3", "db", CreateOptions{}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		want := []string{"db.createapp3"}
@@ -719,4 +913,114 @@ func TestCreateContainers(t *testing.T) {
 			t.Errorf("createdNames = %v, want %v", createdNames, want)
 		}
 	})
+}
+
+func TestCreateContainersProfiles(t *testing.T) {
+	t.Setenv("KRAKEN_HOME", t.TempDir())
+
+	config := "services:\n" +
+		"  api:\n    image: nginx\n" +
+		"  adminer:\n    image: adminer\n    profiles: [debug]\n" +
+		"  mailer:\n    image: mailer\n    profiles: [mail, debug]\n" +
+		"  logs:\n    image: logs\n    profiles: [ops]\n"
+
+	// run creates containers for the profile app and returns the included services
+	// (created, or existing and inspected).
+	// existing names services whose container already exists (inspected as kraken-managed).
+	run := func(t *testing.T, appName, serviceFilter, storedProfile string, opts CreateOptions, existing ...string) []string {
+		t.Helper()
+		if err := store.SaveApp(&store.App{
+			Key:   appName,
+			Value: store.AppValue{Path: t.TempDir(), Profile: storedProfile, Config: store.AppConfig{Data: config}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		exists := map[string]bool{}
+		for _, svc := range existing {
+			exists[ContainerName(appName, svc)] = true
+		}
+		var created []string
+		rt := &fakeRuntime{
+			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) { return true, "id-" + name, nil },
+			ImageExistsFn:   func(ctx context.Context, image string) (bool, error) { return true, nil },
+			ImageVolumesFn:  func(ctx context.Context, image string) ([]string, error) { return nil, nil },
+			ContainerExistsFn: func(ctx context.Context, nameOrID string) (bool, error) {
+				return exists[nameOrID], nil
+			},
+			ContainerInspectFn: func(ctx context.Context, nameOrID string) (*runtime.ContainerInfo, error) {
+				svc, _, _ := strings.Cut(nameOrID, ".")
+				created = append(created, svc) // existing container is included (inspected, then started)
+				return &runtime.ContainerInfo{Labels: map[string]string{LabelApp: appName, LabelService: svc}}, nil
+			},
+			ContainerStartFn: func(ctx context.Context, id string) error { return nil },
+			ContainerCreateFn: func(ctx context.Context, cfg *runtime.ContainerOptions) (string, error) {
+				created = append(created, cfg.Labels[LabelService])
+				return "cid", nil
+			},
+			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, aliases ...string) error { return nil },
+		}
+		tk := newTestKraken(t, rt)
+		if err := CreateContainers(tk.Kraken, appName, serviceFilter, opts); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		sort.Strings(created)
+		return created
+	}
+
+	tests := []struct {
+		name          string
+		serviceFilter string
+		stored        string
+		opts          CreateOptions
+		existing      []string
+		want          []string
+	}{
+		{name: "no profiles: only services without profiles", want: []string{"api"}},
+		{name: "no profiles: optional service with a container is kept", existing: []string{"adminer"}, want: []string{"adminer", "api"}},
+		{name: "no profiles: rebuild recreates services that existed", opts: CreateOptions{Existing: map[string]bool{"adminer": true}}, want: []string{"adminer", "api"}},
+		{name: "profile debug", opts: CreateOptions{Profiles: []string{"debug"}}, want: []string{"adminer", "api", "mailer"}},
+		{name: "profile mail", opts: CreateOptions{Profiles: []string{"mail"}}, want: []string{"api", "mailer"}},
+		{name: "all profiles", opts: CreateOptions{Profiles: []string{"*"}}, want: []string{"adminer", "api", "logs", "mailer"}},
+		{name: "profile given: existing containers of other profiles ignored", opts: CreateOptions{Profiles: []string{"mail"}, Existing: map[string]bool{"adminer": true}}, existing: []string{"logs"}, want: []string{"api", "mailer"}},
+		{name: "explicit service ignores profiles", serviceFilter: "logs", want: []string{"logs"}},
+		{name: "stored profile used when none given", stored: "mail", want: []string{"api", "mailer"}},
+		{name: "stored profile: existing containers of other profiles ignored", stored: "mail", existing: []string{"adminer"}, want: []string{"api", "mailer"}},
+		{name: "given profile overrides stored", stored: "mail", opts: CreateOptions{Profiles: []string{"ops"}}, want: []string{"api", "logs"}},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := run(t, fmt.Sprintf("profapp%d", i), tt.serviceFilter, tt.stored, tt.opts, tt.existing...)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("created %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExistingServices(t *testing.T) {
+	var gotLabels map[string]string
+	rt := &fakeRuntime{
+		ContainerListFn: func(ctx context.Context, all bool, labels map[string]string) ([]runtime.ContainerInfo, error) {
+			gotLabels = labels
+			if !all {
+				t.Error("expected stopped containers to be listed too")
+			}
+			return []runtime.ContainerInfo{
+				{Labels: map[string]string{LabelService: "api"}},
+				{Labels: map[string]string{LabelService: "adminer"}},
+				{Labels: map[string]string{}},
+			}, nil
+		},
+	}
+	tk := newTestKraken(t, rt)
+	got, err := ExistingServices(tk.Kraken, "myapp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(got, map[string]bool{"api": true, "adminer": true}) {
+		t.Errorf("got %v", got)
+	}
+	if !reflect.DeepEqual(gotLabels, AppLabels("myapp")) {
+		t.Errorf("labels = %v", gotLabels)
+	}
 }

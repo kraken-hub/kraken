@@ -35,7 +35,7 @@ func doInit(kraken *app.Kraken) {
 								log.Warn("Warning: %v", err)
 							}
 						}
-						util.RemoveNetwork(kraken, appName)
+						util.RemoveNetworks(kraken, appName)
 						if err := store.DeleteApp(appName); err != nil {
 							return err
 						}

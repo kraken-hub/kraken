@@ -52,6 +52,27 @@ type VolumeCreateOptions struct {
 	Labels     map[string]string
 }
 
+// NetworkCreateOptions holds options for creating a network.
+type NetworkCreateOptions struct {
+	Name       string
+	Driver     string // default: bridge
+	DriverOpts map[string]string
+	Internal   bool
+	Labels     map[string]string
+}
+
+// NetworkInfo is a summary of an existing network.
+type NetworkInfo struct {
+	ID   string
+	Name string
+}
+
+// NetworkAttachment is an extra network a container joins, with optional DNS aliases.
+type NetworkAttachment struct {
+	Name    string
+	Aliases []string
+}
+
 // ContainerOptions holds all configuration needed to create a container.
 type ContainerOptions struct {
 	Name            string
@@ -73,6 +94,7 @@ type ContainerOptions struct {
 	Restart         string
 	RestartMaxRetry int
 	NetworkMode     string
+	Networks        []NetworkAttachment // extra networks joined in addition to the kraken networks
 	Hostname        string
 	AutoRemove      bool
 	Tty             bool
@@ -221,7 +243,10 @@ type Runtime interface {
 	// --- Networks ---
 
 	// NetworkCreate creates a network and returns its ID.
-	NetworkCreate(ctx context.Context, name string, labels map[string]string) (string, error)
+	NetworkCreate(ctx context.Context, opts NetworkCreateOptions) (string, error)
+
+	// NetworkList returns the networks carrying all the given labels.
+	NetworkList(ctx context.Context, labels map[string]string) ([]NetworkInfo, error)
 
 	// NetworkRemove removes a network.
 	NetworkRemove(ctx context.Context, id string) error

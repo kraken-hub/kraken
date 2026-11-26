@@ -25,9 +25,10 @@ type AppConfig struct {
 
 // AppValue holds the runtime metadata for an application.
 type AppValue struct {
-	Path   string    `json:"path"`
-	Env    string    `json:"env"` // comma-separated active envs, e.g. "local,dev,ssl"
-	Config AppConfig `json:"config"`
+	Path    string    `json:"path"`
+	Env     string    `json:"env"`               // comma-separated active envs, e.g. "local,dev,ssl"
+	Profile string    `json:"profile,omitempty"` // comma-separated default profiles, e.g. "debug,mail"
+	Config  AppConfig `json:"config"`
 }
 
 // App is the top-level record stored on disk.

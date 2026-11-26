@@ -86,4 +86,3 @@ func doInit(kraken *app.Kraken) {
 
 	kraken.RootCmd().AddCommand(cmd, setCmd, unsetCmd)
 }
-

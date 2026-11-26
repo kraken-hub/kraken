@@ -45,8 +45,10 @@ func doInit(kraken *app.Kraken) {
 
 	// config:context [app] — show or update application context
 	var (
-		flagEnvAdd    []string
-		flagEnvRemove []string
+		flagEnvAdd        []string
+		flagProfileAdd    []string
+		flagEnvRemove     []string
+		flagProfileRemove []string
 	)
 	contextCmd := &cobra.Command{
 		Use:   "config:context [app]",
@@ -62,34 +64,36 @@ func doInit(kraken *app.Kraken) {
 				kraken.Logger().Fatal("%s", err)
 				os.Exit(2)
 			}
-			if len(flagEnvAdd) == 0 && len(flagEnvRemove) == 0 {
-				fmt.Fprintf(kraken.Out(), "env: %s\nsource: %s\n", appEntry.Value.Env, appEntry.Value.Config.File)
+			envChanged := len(flagEnvAdd) > 0 || len(flagEnvRemove) > 0
+			profileChanged := len(flagProfileAdd) > 0 || len(flagProfileRemove) > 0
+			if !envChanged && !profileChanged {
+				fmt.Fprintf(kraken.Out(), "env: %s\nprofile: %s\nsource: %s\n", appEntry.Value.Env, appEntry.Value.Profile, appEntry.Value.Config.File)
 				return nil
 			}
-			envs := splitEnv(appEntry.Value.Env)
-			for _, e := range flagEnvAdd {
-				if !contains(envs, e) {
-					envs = append(envs, e)
-				}
+			if envChanged {
+				appEntry.Value.Env = updateList(appEntry.Value.Env, flagEnvAdd, flagEnvRemove)
 			}
-			kept := envs[:0]
-			for _, e := range envs {
-				if !contains(flagEnvRemove, e) {
-					kept = append(kept, e)
-				}
+			if profileChanged {
+				appEntry.Value.Profile = updateList(appEntry.Value.Profile, flagProfileAdd, flagProfileRemove)
 			}
-			appEntry.Value.Env = strings.Join(kept, ",")
 			if err := store.SaveApp(appEntry); err != nil {
 				return err
 			}
-			kraken.Logger().Info("Env updated to %q.", appEntry.Value.Env)
+			if envChanged {
+				kraken.Logger().Info("Env updated to %q.", appEntry.Value.Env)
+			}
+			if profileChanged {
+				kraken.Logger().Info("Profile updated to %q.", appEntry.Value.Profile)
+			}
 			return nil
 		},
 	}
 	app.ApplyDefaultFlags(contextCmd)
 	contextCmd.ValidArgsFunction = util.CompleteApps
 	contextCmd.Flags().StringArrayVar(&flagEnvAdd, "add-env", nil, "Add environment(s)")
+	contextCmd.Flags().StringArrayVar(&flagProfileAdd, "add-profile", nil, "Add default profile(s)")
 	contextCmd.Flags().StringArrayVar(&flagEnvRemove, "remove-env", nil, "Remove environment(s)")
+	contextCmd.Flags().StringArrayVar(&flagProfileRemove, "remove-profile", nil, "Remove default profile(s)")
 
 	// config:diff [app] — diff stored snapshot vs local kraken.yaml
 	diffCmd := &cobra.Command{
@@ -164,15 +168,22 @@ func processConfig(appEntry *store.App) (string, error) {
 	return config.LoadYamlFile(cfgFile, util.EnvFunc(appEntry))
 }
 
-func splitEnv(env string) []string {
-	var result []string
-	for _, e := range strings.Split(env, ",") {
-		e = strings.TrimSpace(e)
-		if e != "" {
-			result = append(result, e)
+// updateList adds and removes items in a comma-separated list, keeping order.
+func updateList(current string, add, remove []string) string {
+	items := util.SplitList(current)
+	for _, e := range util.SplitList(add...) {
+		if !contains(items, e) {
+			items = append(items, e)
 		}
 	}
-	return result
+	removed := util.SplitList(remove...)
+	kept := items[:0]
+	for _, e := range items {
+		if !contains(removed, e) {
+			kept = append(kept, e)
+		}
+	}
+	return strings.Join(kept, ",")
 }
 
 func contains(slice []string, item string) bool {

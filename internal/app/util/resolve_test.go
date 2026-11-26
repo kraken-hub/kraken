@@ -273,14 +273,14 @@ func TestInitApp(t *testing.T) {
 	t.Setenv("KRAKEN_ENV", "")
 
 	t.Run("invalid app name rejected", func(t *testing.T) {
-		if _, err := InitApp("Invalid Name", "", "", ""); err == nil {
+		if _, err := InitApp("Invalid Name", "", "", "", ""); err == nil {
 			t.Fatal("expected error for invalid app name")
 		}
 	})
 
 	t.Run("missing config file errors", func(t *testing.T) {
 		dir := t.TempDir()
-		if _, err := InitApp("myapp", dir, "", ""); err == nil {
+		if _, err := InitApp("myapp", dir, "", "", ""); err == nil {
 			t.Fatal("expected error for missing config file")
 		}
 	})
@@ -291,7 +291,7 @@ func TestInitApp(t *testing.T) {
 		if err := os.WriteFile(cfgPath, []byte("services:\n  web:\n    image: nginx\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		appEntry, err := InitApp("myapp", dir, "", "")
+		appEntry, err := InitApp("myapp", dir, "", "", "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -324,7 +324,7 @@ func TestInitApp(t *testing.T) {
 		dir := t.TempDir()
 		cfgPath := filepath.Join(dir, "kraken.yaml")
 		os.WriteFile(cfgPath, []byte("services:\n  web:\n    image: nginx\n"), 0o644)
-		appEntry, err := InitApp("myapp2", dir, "", "prod")
+		appEntry, err := InitApp("myapp2", dir, "", "prod", "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -333,10 +333,41 @@ func TestInitApp(t *testing.T) {
 		}
 	})
 
+	t.Run("profile: explicit, from KRAKEN_PROFILE, or empty", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "kraken.yaml"), []byte("services:\n  web:\n    image: nginx\n"), 0o644)
+
+		t.Setenv("KRAKEN_PROFILE", "")
+		appEntry, err := InitApp("profapp1", dir, "", "", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if appEntry.Value.Profile != "" {
+			t.Errorf("default Profile = %q, want empty", appEntry.Value.Profile)
+		}
+
+		t.Setenv("KRAKEN_PROFILE", "ops")
+		appEntry, err = InitApp("profapp2", dir, "", "", "debug, mail")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if appEntry.Value.Profile != "debug,mail" {
+			t.Errorf("explicit Profile = %q, want debug,mail", appEntry.Value.Profile)
+		}
+
+		appEntry, err = InitApp("profapp3", dir, "", "", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if appEntry.Value.Profile != "ops" {
+			t.Errorf("env Profile = %q, want ops", appEntry.Value.Profile)
+		}
+	})
+
 	t.Run("relative config file resolved under app path", func(t *testing.T) {
 		dir := t.TempDir()
 		os.WriteFile(filepath.Join(dir, "custom.yaml"), []byte("services:\n  web:\n    image: nginx\n"), 0o644)
-		appEntry, err := InitApp("myapp3", dir, "custom.yaml", "")
+		appEntry, err := InitApp("myapp3", dir, "custom.yaml", "", "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
