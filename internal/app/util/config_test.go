@@ -933,6 +933,15 @@ func TestParseServiceNetworks(t *testing.T) {
 			t.Errorf("got %#v, want %#v", got, want)
 		}
 	})
+
+	t.Run("mapping form with ipv4_address, empty means dynamic", func(t *testing.T) {
+		node, ctx := mappingValue(t, "networks:\n  kraken_net:\n    ipv4_address: 172.20.0.53\n  shared:\n    ipv4_address: ''\n  backend:\n    ipv4_address:\n", "networks")
+		got := parseServiceNetworks(ctx, node)
+		want := []runtime.NetworkAttachment{{Name: "kraken_net", IPv4Address: "172.20.0.53"}, {Name: "shared"}, {Name: "backend"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+	})
 }
 
 func TestParsePortSpec(t *testing.T) {

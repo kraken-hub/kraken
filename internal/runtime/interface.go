@@ -59,6 +59,14 @@ type NetworkCreateOptions struct {
 	DriverOpts map[string]string
 	Internal   bool
 	Labels     map[string]string
+	Subnet     string // CIDR; static IPs need a network with a subnet
+	IPRange    string // CIDR inside Subnet that dynamic IPs are taken from
+}
+
+// NetworkConnectOptions holds the settings of a container on a network.
+type NetworkConnectOptions struct {
+	Aliases     []string // additional DNS names on that network
+	IPv4Address string   // static IP; empty = assigned by the network
 }
 
 // NetworkInfo is a summary of an existing network.
@@ -67,10 +75,11 @@ type NetworkInfo struct {
 	Name string
 }
 
-// NetworkAttachment is an extra network a container joins, with optional DNS aliases.
+// NetworkAttachment is a network a container joins, with optional DNS aliases and static IP.
 type NetworkAttachment struct {
-	Name    string
-	Aliases []string
+	Name        string
+	Aliases     []string
+	IPv4Address string
 }
 
 // ContainerOptions holds all configuration needed to create a container.
@@ -94,7 +103,7 @@ type ContainerOptions struct {
 	Restart         string
 	RestartMaxRetry int
 	NetworkMode     string
-	Networks        []NetworkAttachment // extra networks joined in addition to the kraken networks
+	Networks        []NetworkAttachment // extra networks joined in addition to the kraken networks; a kraken_net entry sets its aliases/IP
 	Hostname        string
 	AutoRemove      bool
 	Tty             bool
@@ -255,8 +264,7 @@ type Runtime interface {
 	NetworkExists(ctx context.Context, name string) (bool, string, error)
 
 	// NetworkConnect attaches a container to a network.
-	// aliases registers additional DNS names for the container on that network.
-	NetworkConnect(ctx context.Context, networkID, containerID string, aliases ...string) error
+	NetworkConnect(ctx context.Context, networkID, containerID string, opts NetworkConnectOptions) error
 
 	// --- Volumes ---
 

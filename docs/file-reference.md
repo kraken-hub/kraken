@@ -302,6 +302,23 @@ networks:
 
 On extra networks the container is resolvable by its container name (`api.my-app`) and its `aliases` — not by the bare service name, so services of different apps don't collide on a shared network.
 
+#### Static IP
+
+`ipv4_address` gives the container a fixed IP on a network. The global `kraken_net` can be listed here without a top-level declaration, so other containers can rely on the address, e.g. as their [`dns`](#dns) server:
+
+```yaml
+networks:
+  kraken_net:
+    ipv4_address: 172.20.0.53
+  shared:
+    ipv4_address: ${SHARED_IP-}     # empty = assigned by the network
+```
+
+- The network must have a subnet: for `kraken_net` set [`KRAKEN_NET_SUBNET`](env-vars.md#networks) before kraken creates it; an external network needs one from its creator. Otherwise the container is not connected and is removed again.
+- Pick an address outside the network's dynamic range (`KRAKEN_NET_IP_RANGE` for `kraken_net`), so no other container gets it while this one is being recreated.
+- An address already in use is an error (so a service with [`scale`](#scale-experimental) can't share one).
+- `kraken run` ignores `ipv4_address`, since the service container may be holding the address; `kraken run --ip <address>` sets one on `kraken_net` explicitly.
+
 ---
 
 ### env_file
@@ -594,6 +611,26 @@ extends:
   service: base-service
 ```
 
+Relative paths in an extended file are relative to that file, not to the app directory:
+
+- `file:` of an `extends` resolves against the directory of the file that contains it (also inside an extended file);
+- `build` (path, `context`, first item of a `context` list), `env_file` and bind-mount `volumes` sources of its services resolve against the extended file's directory. A `build` mapping without `context` uses that directory as context. Named volumes, container-only volumes and container paths (`cmd`, `workdir`, ...) are not paths on the host and stay as they are.
+
+Absolute paths, e.g. `${APP_PATH}/...`, are used as is. `kraken config` shows the rebased paths relative to the app directory:
+
+```yaml
+# services/web/kraken.yaml
+services:
+  web:
+    build: ../../docker/web     # → ./docker/web
+    env_file: web.env           # → ./services/web/web.env
+    volumes:
+      ./data: /data             # → ./services/web/data
+      cache: /cache             # named volume, unchanged
+```
+
+The external file is processed like the app's own config: `${VAR}` values come from the same sources (`APP_NAME`, `APP_PATH`, `APP_ENV`, `.env.local`, `.env`, host env) and `~env` sections in it match the app's environment.
+
 Scale expansion in the base file runs before the `service:` lookup, so if the referenced service has `scale: N`, it no longer exists under its original name — reference a specific replica by its expanded name instead (`service: base-service1`, `service: base-service2`, ...). Referencing the pre-expansion name of a scaled service returns an error.
 
 With JS merge function (same signature as `extend`):
@@ -739,7 +776,9 @@ networks:
     name: edge_net
 ```
 
-App networks are named `kraken_net.{app}.{name}`, carry labels `kraken.app` and `kraken.network` (YAML network name), are created on start and removed (together with `kraken_net.{app}`) on `remove --purge`. Settings only apply when the network is created — change them on an existing network with `remove --purge` or by removing the network manually. Networks marked `external` are never created or removed by kraken; `external: {name: ...}` is accepted too. The name `default` is reserved.
+App networks are named `kraken_net.{app}.{name}`, carry labels `kraken.app` and `kraken.network` (YAML network name), are created on start and removed (together with `kraken_net.{app}`) on `remove --purge`. Settings only apply when the network is created — change them on an existing network with `remove --purge` or by removing the network manually. Networks marked `external` are never created or removed by kraken; `external: {name: ...}` is accepted too. The names `default` and `kraken_net` are reserved.
+
+`kraken_net` itself is configured through [environment variables](env-vars.md#networks) (subnet, dynamic IP range), since it is shared by all apps.
 
 ---
 

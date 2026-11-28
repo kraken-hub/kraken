@@ -661,7 +661,8 @@ func parsePorts(ctx *yaml.Ctx, node yaml.Node) map[string]string {
 }
 
 // parseServiceNetworks parses a service's networks: list (`- name`) or mapping
-// (`name:` with optional `aliases:`) into network attachments, in document order.
+// (`name:` with optional `aliases:` and `ipv4_address:`) into network attachments,
+// in document order. An empty ipv4_address means a dynamic IP.
 func parseServiceNetworks(ctx *yaml.Ctx, node yaml.Node) []runtime.NetworkAttachment {
 	var result []runtime.NetworkAttachment
 	switch t := yaml.Resolve(ctx, node).(type) {
@@ -678,6 +679,9 @@ func parseServiceNetworks(ctx *yaml.Ctx, node yaml.Node) []runtime.NetworkAttach
 				for _, item := range yaml.SeqItems(ctx, aliasesNode) {
 					att.Aliases = append(att.Aliases, yaml.ScalarText(yaml.Resolve(ctx, item)))
 				}
+			}
+			if ipNode := findMappingKey(ctx, mv.Value, "ipv4_address"); ipNode != nil {
+				att.IPv4Address = strings.TrimSpace(yaml.ScalarText(yaml.Resolve(ctx, ipNode)))
 			}
 			result = append(result, att)
 		}

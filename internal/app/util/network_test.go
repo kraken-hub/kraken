@@ -62,6 +62,52 @@ func TestEnsureNetworks(t *testing.T) {
 		}
 	})
 
+	t.Run("kraken_net gets subnet and IP range from env", func(t *testing.T) {
+		t.Setenv("KRAKEN_NET_SUBNET", "172.20.0.0/16")
+		t.Setenv("KRAKEN_NET_IP_RANGE", "172.20.128.0/17")
+		created := map[string]runtime.NetworkCreateOptions{}
+		rt := &fakeRuntime{
+			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) {
+				return false, "", nil
+			},
+			NetworkCreateFn: func(ctx context.Context, opts runtime.NetworkCreateOptions) (string, error) {
+				created[opts.Name] = opts
+				return "id", nil
+			},
+		}
+		tk := newTestKraken(t, rt)
+
+		if _, _, err := EnsureNetworks(tk.Kraken, "myapp"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if g := created["kraken_net"]; g.Subnet != "172.20.0.0/16" || g.IPRange != "172.20.128.0/17" {
+			t.Errorf("kraken_net subnet/range = %q/%q", g.Subnet, g.IPRange)
+		}
+		if a := created["kraken_net.myapp"]; a.Subnet != "" || a.IPRange != "" {
+			t.Errorf("kraken_net.myapp subnet/range = %q/%q, want empty", a.Subnet, a.IPRange)
+		}
+	})
+
+	t.Run("IP range without subnet errors before create", func(t *testing.T) {
+		t.Setenv("KRAKEN_NET_SUBNET", "")
+		t.Setenv("KRAKEN_NET_IP_RANGE", "172.20.128.0/17")
+		rt := &fakeRuntime{
+			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) {
+				return false, "", nil
+			},
+			NetworkCreateFn: func(ctx context.Context, opts runtime.NetworkCreateOptions) (string, error) {
+				t.Fatalf("NetworkCreate should not be called for %q", opts.Name)
+				return "", nil
+			},
+		}
+		tk := newTestKraken(t, rt)
+
+		_, _, err := EnsureNetworks(tk.Kraken, "myapp")
+		if err == nil || !strings.Contains(err.Error(), "KRAKEN_NET_IP_RANGE needs KRAKEN_NET_SUBNET") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
 	t.Run("propagates NetworkExists error", func(t *testing.T) {
 		rt := &fakeRuntime{
 			NetworkExistsFn: func(ctx context.Context, name string) (bool, string, error) {
@@ -274,13 +320,15 @@ func TestEnsureAppNetworks(t *testing.T) {
 		}
 	})
 
-	t.Run("default is reserved", func(t *testing.T) {
-		tk := newTestKraken(t, &fakeRuntime{})
-		_, err := EnsureAppNetworks(tk.Kraken, "myapp", appWithConfig("networks:\n  default:\n"))
-		if err == nil || !strings.Contains(err.Error(), "reserved") {
-			t.Fatalf("err = %v", err)
-		}
-	})
+	for _, name := range []string{"default", "kraken_net"} {
+		t.Run(name+" is reserved", func(t *testing.T) {
+			tk := newTestKraken(t, &fakeRuntime{})
+			_, err := EnsureAppNetworks(tk.Kraken, "myapp", appWithConfig("networks:\n  "+name+":\n"))
+			if err == nil || !strings.Contains(err.Error(), "reserved") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
 }
 
 func TestResolveNetworkAttachments(t *testing.T) {
@@ -311,6 +359,80 @@ func TestResolveNetworkAttachments(t *testing.T) {
 			t.Fatalf("err = %v", err)
 		}
 	})
+
+	t.Run("kraken_net needs no declaration, IPs are kept", func(t *testing.T) {
+		cfg := &runtime.ContainerOptions{Name: "api.myapp", Networks: []runtime.NetworkAttachment{
+			{Name: "kraken_net", IPv4Address: "172.20.0.53"},
+			{Name: "shared", IPv4Address: "10.5.0.10"},
+		}}
+		if err := ResolveNetworkAttachments(cfg, appNetworks); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []runtime.NetworkAttachment{
+			{Name: "kraken_net", IPv4Address: "172.20.0.53"},
+			{Name: "shared", IPv4Address: "10.5.0.10"},
+		}
+		if !reflect.DeepEqual(cfg.Networks, want) {
+			t.Errorf("got %#v, want %#v", cfg.Networks, want)
+		}
+	})
+
+	for _, ip := range []string{"172.20.0", "fd00::53", "pier"} {
+		t.Run("invalid ipv4_address "+ip+" errors", func(t *testing.T) {
+			cfg := &runtime.ContainerOptions{Name: "api.myapp", Networks: []runtime.NetworkAttachment{{Name: "kraken_net", IPv4Address: ip}}}
+			err := ResolveNetworkAttachments(cfg, appNetworks)
+			if err == nil || !strings.Contains(err.Error(), "is not an IPv4 address") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+func TestApplyRunIPv4Address(t *testing.T) {
+	tests := []struct {
+		name     string
+		networks []runtime.NetworkAttachment
+		ip       string
+		want     []runtime.NetworkAttachment
+	}{
+		{
+			name:     "service IPs are cleared",
+			networks: []runtime.NetworkAttachment{{Name: "kraken_net", Aliases: []string{"dns.lh"}, IPv4Address: "172.20.0.53"}, {Name: "shared", IPv4Address: "10.5.0.10"}},
+			want:     []runtime.NetworkAttachment{{Name: "kraken_net", Aliases: []string{"dns.lh"}}, {Name: "shared"}},
+		},
+		{
+			name:     "ip replaces the kraken_net IP",
+			networks: []runtime.NetworkAttachment{{Name: "kraken_net", IPv4Address: "172.20.0.53"}},
+			ip:       "172.20.0.54",
+			want:     []runtime.NetworkAttachment{{Name: "kraken_net", IPv4Address: "172.20.0.54"}},
+		},
+		{
+			name:     "ip adds a kraken_net entry",
+			networks: []runtime.NetworkAttachment{{Name: "shared", IPv4Address: "10.5.0.10"}},
+			ip:       "172.20.0.54",
+			want:     []runtime.NetworkAttachment{{Name: "shared"}, {Name: "kraken_net", IPv4Address: "172.20.0.54"}},
+		},
+		{
+			name: "no networks, no ip",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &runtime.ContainerOptions{Networks: tt.networks}
+			ApplyRunIPv4Address(cfg, tt.ip)
+			if !reflect.DeepEqual(cfg.Networks, tt.want) {
+				t.Errorf("got %#v, want %#v", cfg.Networks, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsIPv4(t *testing.T) {
+	for s, want := range map[string]bool{"172.20.0.53": true, "0.0.0.0": true, "172.20.0": false, "fd00::53": false, "": false, "pier": false} {
+		if got := IsIPv4(s); got != want {
+			t.Errorf("IsIPv4(%q) = %v, want %v", s, got, want)
+		}
+	}
 }
 
 func TestValidateExtraNetworks(t *testing.T) {
@@ -373,39 +495,90 @@ func TestAppendExtraNetworks(t *testing.T) {
 func TestConnectNetworks(t *testing.T) {
 	type connect struct {
 		network string
-		aliases []string
+		opts    runtime.NetworkConnectOptions
 	}
 
 	t.Run("kraken networks then extra networks", func(t *testing.T) {
 		var got []connect
 		rt := &fakeRuntime{
-			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, aliases ...string) error {
-				got = append(got, connect{networkID, aliases})
+			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, opts runtime.NetworkConnectOptions) error {
+				got = append(got, connect{networkID, opts})
 				return nil
 			},
 		}
 		tk := newTestKraken(t, rt)
 		cfg := &runtime.ContainerOptions{Name: "api.myapp", Networks: []runtime.NetworkAttachment{
-			{Name: "shared", Aliases: []string{"api.lh"}},
+			{Name: "shared", Aliases: []string{"api.lh"}, IPv4Address: "10.5.0.10"},
 			{Name: "kraken_net.myapp.backend"},
 		}}
 		if err := ConnectNetworks(tk.Kraken, "myapp", "api", "cid", cfg, "global-id", "app-id"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		want := []connect{
-			{"global-id", []string{"api.myapp"}},
-			{"app-id", []string{"api"}},
-			{"shared", []string{"api.lh"}},
-			{"kraken_net.myapp.backend", nil},
+			{"global-id", runtime.NetworkConnectOptions{Aliases: []string{"api.myapp"}}},
+			{"app-id", runtime.NetworkConnectOptions{Aliases: []string{"api"}}},
+			{"shared", runtime.NetworkConnectOptions{Aliases: []string{"api.lh"}, IPv4Address: "10.5.0.10"}},
+			{"kraken_net.myapp.backend", runtime.NetworkConnectOptions{}},
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("got %#v, want %#v", got, want)
 		}
 	})
 
+	t.Run("kraken_net entry sets aliases and IP of the global connection", func(t *testing.T) {
+		var got []connect
+		rt := &fakeRuntime{
+			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, opts runtime.NetworkConnectOptions) error {
+				got = append(got, connect{networkID, opts})
+				return nil
+			},
+		}
+		tk := newTestKraken(t, rt)
+		cfg := &runtime.ContainerOptions{Name: "dns.myapp", Networks: []runtime.NetworkAttachment{
+			{Name: "kraken_net", Aliases: []string{"dns.lh"}, IPv4Address: "172.20.0.53"},
+		}}
+		if err := ConnectNetworks(tk.Kraken, "myapp", "dns", "cid", cfg, "global-id", "app-id"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []connect{
+			{"global-id", runtime.NetworkConnectOptions{Aliases: []string{"dns.myapp", "dns.lh"}, IPv4Address: "172.20.0.53"}},
+			{"app-id", runtime.NetworkConnectOptions{Aliases: []string{"dns"}}},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("failed connect removes the container", func(t *testing.T) {
+		var removed []string
+		rt := &fakeRuntime{
+			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, opts runtime.NetworkConnectOptions) error {
+				if opts.IPv4Address != "" {
+					return errors.New("address already in use")
+				}
+				return nil
+			},
+			ContainerRemoveFn: func(ctx context.Context, id string, force, removeVolumes bool) error {
+				removed = append(removed, id)
+				return nil
+			},
+		}
+		tk := newTestKraken(t, rt)
+		cfg := &runtime.ContainerOptions{Name: "dns.myapp", Networks: []runtime.NetworkAttachment{
+			{Name: "kraken_net", IPv4Address: "172.20.0.53"},
+		}}
+		err := ConnectNetworks(tk.Kraken, "myapp", "dns", "cid", cfg, "global-id", "app-id")
+		if err == nil || !strings.Contains(err.Error(), "address already in use") {
+			t.Fatalf("err = %v", err)
+		}
+		if !reflect.DeepEqual(removed, []string{"cid"}) {
+			t.Errorf("removed = %v, want [cid]", removed)
+		}
+	})
+
 	t.Run("non-bridge mode connects nothing", func(t *testing.T) {
 		rt := &fakeRuntime{
-			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, aliases ...string) error {
+			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, opts runtime.NetworkConnectOptions) error {
 				t.Fatalf("NetworkConnect should not be called")
 				return nil
 			},

@@ -39,7 +39,7 @@ type fakeRuntime struct {
 	NetworkListFn           func(ctx context.Context, labels map[string]string) ([]runtime.NetworkInfo, error)
 	NetworkRemoveFn         func(ctx context.Context, id string) error
 	NetworkExistsFn         func(ctx context.Context, name string) (bool, string, error)
-	NetworkConnectFn        func(ctx context.Context, networkID, containerID string, aliases ...string) error
+	NetworkConnectFn        func(ctx context.Context, networkID, containerID string, opts runtime.NetworkConnectOptions) error
 	VolumeCreateFn          func(ctx context.Context, opts runtime.VolumeCreateOptions) error
 	VolumeRemoveFn          func(ctx context.Context, name string, force bool) error
 	VolumeExistsFn          func(ctx context.Context, name string) (bool, error)
@@ -215,11 +215,11 @@ func (f *fakeRuntime) NetworkExists(ctx context.Context, name string) (bool, str
 	return f.NetworkExistsFn(ctx, name)
 }
 
-func (f *fakeRuntime) NetworkConnect(ctx context.Context, networkID, containerID string, aliases ...string) error {
+func (f *fakeRuntime) NetworkConnect(ctx context.Context, networkID, containerID string, opts runtime.NetworkConnectOptions) error {
 	if f.NetworkConnectFn == nil {
 		panic("NetworkConnect not implemented")
 	}
-	return f.NetworkConnectFn(ctx, networkID, containerID, aliases...)
+	return f.NetworkConnectFn(ctx, networkID, containerID, opts)
 }
 
 func (f *fakeRuntime) VolumeCreate(ctx context.Context, opts runtime.VolumeCreateOptions) error {

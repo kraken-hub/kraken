@@ -673,12 +673,18 @@ func (r *DockerRuntime) NetworkCreate(ctx context.Context, opts NetworkCreateOpt
 	if driver == "" {
 		driver = "bridge"
 	}
-	resp, err := r.cli.NetworkCreate(ctx, opts.Name, network.CreateOptions{
+	createOpts := network.CreateOptions{
 		Driver:   driver,
 		Options:  opts.DriverOpts,
 		Internal: opts.Internal,
 		Labels:   opts.Labels,
-	})
+	}
+	if opts.Subnet != "" {
+		createOpts.IPAM = &network.IPAM{
+			Config: []network.IPAMConfig{{Subnet: opts.Subnet, IPRange: opts.IPRange}},
+		}
+	}
+	resp, err := r.cli.NetworkCreate(ctx, opts.Name, createOpts)
 	if err != nil {
 		return "", fmt.Errorf("create network %q: %w", opts.Name, err)
 	}
@@ -720,10 +726,12 @@ func (r *DockerRuntime) NetworkExists(ctx context.Context, name string) (bool, s
 	return false, "", nil
 }
 
-func (r *DockerRuntime) NetworkConnect(ctx context.Context, networkID, containerID string, aliases ...string) error {
-	return r.cli.NetworkConnect(ctx, networkID, containerID, &network.EndpointSettings{
-		Aliases: aliases,
-	})
+func (r *DockerRuntime) NetworkConnect(ctx context.Context, networkID, containerID string, opts NetworkConnectOptions) error {
+	endpoint := &network.EndpointSettings{Aliases: opts.Aliases}
+	if opts.IPv4Address != "" {
+		endpoint.IPAMConfig = &network.EndpointIPAMConfig{IPv4Address: opts.IPv4Address}
+	}
+	return r.cli.NetworkConnect(ctx, networkID, containerID, endpoint)
 }
 
 // ---- Volumes ----

@@ -67,7 +67,7 @@ func doInit(kraken *app.Kraken) {
 			envChanged := len(flagEnvAdd) > 0 || len(flagEnvRemove) > 0
 			profileChanged := len(flagProfileAdd) > 0 || len(flagProfileRemove) > 0
 			if !envChanged && !profileChanged {
-				fmt.Fprintf(kraken.Out(), "env: %s\nprofile: %s\nsource: %s\n", appEntry.Value.Env, appEntry.Value.Profile, appEntry.Value.Config.File)
+				fmt.Fprint(kraken.Out(), formatContext(appEntry.Value.Env, appEntry.Value.Profile, appEntry.Value.Config.File))
 				return nil
 			}
 			if envChanged {
@@ -169,6 +169,19 @@ func processConfig(appEntry *store.App) (string, error) {
 }
 
 // updateList adds and removes items in a comma-separated list, keeping order.
+// formatContext renders the app context; an empty env or profile is left out.
+func formatContext(env, profile, file string) string {
+	var b strings.Builder
+	if env != "" {
+		fmt.Fprintf(&b, "env: %s\n", env)
+	}
+	if profile != "" {
+		fmt.Fprintf(&b, "profile: %s\n", profile)
+	}
+	fmt.Fprintf(&b, "source: %s\n", file)
+	return b.String()
+}
+
 func updateList(current string, add, remove []string) string {
 	items := util.SplitList(current)
 	for _, e := range util.SplitList(add...) {

@@ -1044,6 +1044,254 @@ services:
 	}
 }
 
+func TestLoadYamlFile_ExtendsUsesAppVarsAndEnv(t *testing.T) {
+	dir := t.TempDir()
+	writeTempYaml(t, dir, "base.yaml", `
+services:
+  base:
+    image: ${REGISTRY}/web
+    labels:
+      host: 'web.${APP_NAME}.internal'
+    ~expose:
+      ports:
+        - 8080:8080
+`)
+	path := writeTempYaml(t, dir, "kraken.yaml", `
+services:
+  web:
+    extends:
+      file: ${APP_PATH}/base.yaml
+      service: base
+`)
+
+	env := func(key string) string {
+		switch key {
+		case "APP_ENV":
+			return "dev,expose"
+		case "APP_NAME":
+			return "my-app"
+		case "APP_PATH":
+			return dir
+		case "REGISTRY":
+			return "registry.example"
+		}
+		return ""
+	}
+
+	out, err := LoadYamlFile(path, env)
+	if err != nil {
+		t.Fatalf("LoadYamlFile failed: %v", err)
+	}
+
+	var v interface{}
+	if err := yaml.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("failed to parse LoadYamlFile output: %v\noutput:\n%s", err, out)
+	}
+
+	want := map[string]interface{}{
+		"services": map[string]interface{}{
+			"web": map[string]interface{}{
+				"image":  "registry.example/web",
+				"labels": map[string]interface{}{"host": "web.my-app.internal"},
+				"ports":  []interface{}{"8080:8080"},
+			},
+		},
+	}
+	if !reflect.DeepEqual(v, want) {
+		t.Fatalf("got %#v, want %#v", v, want)
+	}
+}
+
+func TestLoadYamlFile_ExtendsFileRelativeToReferencingFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "app"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "base", "inner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTempYaml(t, filepath.Join(dir, "base", "inner"), "db.yaml", `
+services:
+  db:
+    image: inner-image
+`)
+	writeTempYaml(t, filepath.Join(dir, "base"), "base.yaml", `
+services:
+  db:
+    extends:
+      file: inner/db.yaml
+      service: db
+`)
+	path := writeTempYaml(t, filepath.Join(dir, "app"), "kraken.yaml", `
+services:
+  mysql:
+    extends:
+      file: ../base/base.yaml
+      service: db
+`)
+
+	out, err := LoadYamlFile(path, func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("LoadYamlFile failed: %v", err)
+	}
+
+	var v interface{}
+	if err := yaml.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("failed to parse LoadYamlFile output: %v\noutput:\n%s", err, out)
+	}
+
+	want := map[string]interface{}{
+		"services": map[string]interface{}{
+			"mysql": map[string]interface{}{"image": "inner-image"},
+		},
+	}
+	if !reflect.DeepEqual(v, want) {
+		t.Fatalf("got %#v, want %#v", v, want)
+	}
+}
+
+func TestLoadYamlFile_ExtendsRebasesBaseServicePaths(t *testing.T) {
+	app := t.TempDir()
+	for _, d := range []string{"services/web", "services/common"} {
+		if err := os.MkdirAll(filepath.Join(app, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTempYaml(t, filepath.Join(app, "services/common"), "kraken.yaml", `
+services:
+  base:
+    env_file: common.env
+`)
+	writeTempYaml(t, filepath.Join(app, "services/web"), "kraken.yaml", `
+services:
+  web:
+    build: ../../docker/web
+    env_file: env
+    volumes:
+      ../..: /var/www
+      conf/app.ini: /etc/app.ini:ro
+      .profile: /root/.profile
+      /abs/path: /abs
+      /cache:
+      data: /data
+    cmd: services/web/run.sh
+  worker:
+    build:
+      context: .
+      file: Dockerfile.worker
+    env_file:
+      - env
+      - /etc/abs.env
+    volumes:
+      - ./data:/data
+      - /tmp/cache
+      - logs:/logs
+  inline:
+    build:
+      file_inline: FROM alpine
+  nested:
+    extends:
+      file: ../common/kraken.yaml
+      service: base
+`)
+	writeTempYaml(t, app, "base.yaml", `
+services:
+  base:
+    env_file: env
+    volumes:
+      ./data: /data
+`)
+	path := writeTempYaml(t, app, "kraken.yaml", `
+services:
+  web:
+    extends:
+      file: services/web/kraken.yaml
+      service: web
+  worker:
+    extends:
+      file: services/web/kraken.yaml
+      service: worker
+  local:
+    extends:
+      file: services/web/kraken.yaml
+      service: web
+    env_file: local.env
+  inline:
+    extends:
+      file: services/web/kraken.yaml
+      service: inline
+  nested:
+    extends:
+      file: services/web/kraken.yaml
+      service: nested
+  root:
+    extends:
+      file: base.yaml
+      service: base
+`)
+
+	env := func(key string) string {
+		if key == "APP_PATH" {
+			return app
+		}
+		return ""
+	}
+
+	out, err := LoadYamlFile(path, env)
+	if err != nil {
+		t.Fatalf("LoadYamlFile failed: %v", err)
+	}
+
+	var v interface{}
+	if err := yaml.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("failed to parse LoadYamlFile output: %v\noutput:\n%s", err, out)
+	}
+	services := v.(map[string]interface{})["services"].(map[string]interface{})
+
+	webVolumes := map[string]interface{}{
+		".":                           "/var/www",
+		"./services/web/conf/app.ini": "/etc/app.ini:ro",
+		"./services/web/.profile":     "/root/.profile",
+		"/abs/path":                   "/abs",
+		"/cache":                      nil,
+		"data":                        "/data",
+	}
+	want := map[string]interface{}{
+		"web": map[string]interface{}{
+			"build":    "./docker/web",
+			"env_file": "./services/web/env",
+			"volumes":  webVolumes,
+			"cmd":      "services/web/run.sh",
+		},
+		"worker": map[string]interface{}{
+			"build":    map[string]interface{}{"context": "./services/web", "file": "Dockerfile.worker"},
+			"env_file": []interface{}{"./services/web/env", "/etc/abs.env"},
+			"volumes":  []interface{}{"./services/web/data:/data", "/tmp/cache", "logs:/logs"},
+		},
+		"local": map[string]interface{}{
+			"build":    "./docker/web",
+			"env_file": "local.env",
+			"volumes":  webVolumes,
+			"cmd":      "services/web/run.sh",
+		},
+		"inline": map[string]interface{}{
+			"build": map[string]interface{}{"file_inline": "FROM alpine", "context": "./services/web"},
+		},
+		"nested": map[string]interface{}{
+			"env_file": "./services/common/common.env",
+		},
+		"root": map[string]interface{}{
+			"env_file": "env",
+			"volumes":  map[string]interface{}{"./data": "/data"},
+		},
+	}
+	for name, w := range want {
+		if !reflect.DeepEqual(services[name], w) {
+			t.Errorf("%s: got %#v, want %#v", name, services[name], w)
+		}
+	}
+}
+
 func TestLoadYamlFile_MissingFileReturnsError(t *testing.T) {
 	_, err := LoadYamlFile("/nonexistent/kraken.yaml", func(string) string { return "" })
 	if err == nil {

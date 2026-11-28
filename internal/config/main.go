@@ -13,6 +13,12 @@ import (
 )
 
 func LoadYamlFile(file string, env func(string) string) (string, error) {
+	return loadYamlFile(file, env, false)
+}
+
+// loadYamlFile is LoadYamlFile; extended marks a file loaded through extends,
+// whose relative service paths are relative to the file itself.
+func loadYamlFile(file string, env func(string) string, extended bool) (string, error) {
 	data, err := template.RenderTemplateFile(file, env)
 	if err != nil {
 		return "", err
@@ -23,7 +29,7 @@ func LoadYamlFile(file string, env func(string) string) (string, error) {
 		return "", err
 	}
 
-	err = PrepareYaml(node, env("APP_ENV"))
+	err = prepareYaml(node, env("APP_ENV"), env, filepath.Dir(file), extended)
 	if err != nil {
 		return "", err
 	}
@@ -37,6 +43,16 @@ func LoadYamlFile(file string, env func(string) string) (string, error) {
 }
 
 func PrepareYaml(node yaml.Node, env string) error {
+	return prepareYaml(node, env, os.Getenv, "", false)
+}
+
+// prepareYaml is PrepareYaml with the variable lookup used for files pulled
+// in by extends, so they see the same ${VAR} values and environment as the
+// file that references them. A relative extends file is resolved against
+// baseDir, the directory of that file (the working directory when empty).
+// With extended set, the file was itself loaded through extends and its
+// relative service paths are rebased from baseDir (see rebaseServicePaths).
+func prepareYaml(node yaml.Node, env string, envFunc func(string) string, baseDir string, extended bool) error {
 	ctx := yaml.NewCtx()
 	ctx.Index(node)
 
@@ -55,6 +71,12 @@ func PrepareYaml(node yaml.Node, env string) error {
 
 	_, servicesVal := yaml.FindValue(ctx, rootNode, "services")
 	services, _ := yaml.Resolve(ctx, servicesVal).(*yaml.MappingNode)
+
+	// Before any extend/extends merge: values merged in from another file are
+	// already rebased, and same-file extend copies values rebased here.
+	if extended {
+		rebaseServicePaths(ctx, services, baseDir, envFunc("APP_PATH"))
+	}
 
 	if services != nil {
 		for i := 0; i < len(services.Values); i++ {
@@ -83,12 +105,16 @@ func PrepareYaml(node yaml.Node, env string) error {
 				}
 
 				_, fileVal := yaml.FindValue(ctx, extends, "file")
-				filePath, err := filepath.Abs(yaml.ScalarText(fileVal))
+				filePath := yaml.ScalarText(fileVal)
+				if !filepath.IsAbs(filePath) {
+					filePath = filepath.Join(baseDir, filePath)
+				}
+				filePath, err := filepath.Abs(filePath)
 				if err != nil {
 					return err
 				}
 
-				data, err := LoadYamlFile(filePath, os.Getenv)
+				data, err := loadYamlFile(filePath, envFunc, true)
 				if err != nil {
 					return err
 				}

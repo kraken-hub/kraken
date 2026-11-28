@@ -25,6 +25,15 @@
 | `KRAKEN_PROFILE` | — | Default [profile(s)](file-reference.md#profiles) stored when registering an app (`kraken init`, `kraken start --init`) and no `--profile` flag is given, comma-separated (`debug,mail`, `*` for all). |
 | `KRAKEN_SHELL` | `/bin/sh` | Shell used for interactive `run` and `exec` when no command is specified. |
 
+## Networks
+
+Used only when kraken creates the global `kraken_net` network. An existing network is left as is: to apply new values, remove the containers on it and the network (`docker network rm kraken_net`), then start the apps again.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KRAKEN_NET_SUBNET` | assigned by Docker | Subnet of `kraken_net` in CIDR form (e.g. `172.20.0.0/16`). Needed for [static IPs](file-reference.md#static-ip) on it. Creation fails with "Pool overlaps" if another network already uses the range. |
+| `KRAKEN_NET_IP_RANGE` | whole subnet | Part of the subnet that dynamic IPs are taken from, in CIDR form (e.g. `172.20.128.0/17`). Static IPs outside it are never given to another container. Requires `KRAKEN_NET_SUBNET`. Docker uses the first address of the range as the gateway. |
+
 ## Output
 
 | Variable | Default | Description |

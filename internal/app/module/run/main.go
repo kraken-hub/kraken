@@ -18,6 +18,7 @@ func doInit(kraken *app.Kraken) {
 		flagDetach         bool
 		flagEntrypoint     string
 		flagEnv            []string
+		flagIP             string
 		flagNetworks       []string
 		flagNetworkMode    string
 		flagNonInteractive bool
@@ -39,6 +40,10 @@ func doInit(kraken *app.Kraken) {
 			publishPorts, err := util.ParsePublishPorts(flagPublish)
 			if err != nil {
 				kraken.Logger().Fatal("%s", err)
+				os.Exit(2)
+			}
+			if flagIP != "" && !util.IsIPv4(flagIP) {
+				kraken.Logger().Fatal("--ip %q is not an IPv4 address", flagIP)
 				os.Exit(2)
 			}
 
@@ -125,11 +130,17 @@ func doInit(kraken *app.Kraken) {
 			containerCfg.AutoRemove = true
 			// Service ports belong to the service container; only explicitly published ports apply.
 			containerCfg.Ports = publishPorts
+			// Static IPs belong to the service container too; only an explicit --ip applies.
+			util.ApplyRunIPv4Address(containerCfg, flagIP)
 			if cmd.Flags().Changed("network-mode") {
 				containerCfg.NetworkMode = flagNetworkMode
 			}
 			if len(publishPorts) > 0 && !util.UsesKrakenNetworks(containerCfg.NetworkMode) {
 				kraken.Logger().Fatal("--publish can't be used with network mode %q", containerCfg.NetworkMode)
+				os.Exit(2)
+			}
+			if flagIP != "" && !util.UsesKrakenNetworks(containerCfg.NetworkMode) {
+				kraken.Logger().Fatal("--ip can't be used with network mode %q", containerCfg.NetworkMode)
 				os.Exit(2)
 			}
 			appNetworks, err := util.EnsureAppNetworks(kraken, appName, appEntry)
@@ -226,6 +237,7 @@ func doInit(kraken *app.Kraken) {
 	cmd.Flags().BoolVarP(&flagDetach, "detach", "d", false, "Run in background")
 	cmd.Flags().StringVar(&flagEntrypoint, "entrypoint", "", "Override container entrypoint (\"\" to clear)")
 	cmd.Flags().StringArrayVarP(&flagEnv, "env", "e", nil, "Set environment variables")
+	cmd.Flags().StringVar(&flagIP, "ip", "", "Static IPv4 address on kraken_net (service ipv4_address values are not applied)")
 	cmd.Flags().StringArrayVar(&flagNetworks, "network", nil, "Join an extra network by its full name from \"docker network ls\" (repeatable)")
 	cmd.Flags().StringVar(&flagNetworkMode, "network-mode", "", "Network mode: bridge, host, none, container:<name>, service:<name> (default: service network_mode)")
 	cmd.Flags().BoolVar(&flagNonInteractive, "non-interactive", false, "Non-interactive mode")

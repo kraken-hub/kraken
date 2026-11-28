@@ -653,7 +653,7 @@ func TestCreateContainers(t *testing.T) {
 				createdName = cfg.Name
 				return "container-id-1", nil
 			},
-			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, aliases ...string) error {
+			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, opts runtime.NetworkConnectOptions) error {
 				return nil
 			},
 		}
@@ -697,8 +697,8 @@ func TestCreateContainers(t *testing.T) {
 			ContainerCreateFn: func(ctx context.Context, cfg *runtime.ContainerOptions) (string, error) {
 				return "cid", nil
 			},
-			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, aliases ...string) error {
-				connected = append(connected, networkID+"="+strings.Join(aliases, ","))
+			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, opts runtime.NetworkConnectOptions) error {
+				connected = append(connected, networkID+"="+strings.Join(opts.Aliases, ","))
 				return nil
 			},
 		}
@@ -777,7 +777,7 @@ func TestCreateContainers(t *testing.T) {
 				}
 				return "id-" + cfg.Name, nil
 			},
-			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, aliases ...string) error {
+			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, opts runtime.NetworkConnectOptions) error {
 				connects++
 				return nil
 			},
@@ -900,7 +900,7 @@ func TestCreateContainers(t *testing.T) {
 				createdNames = append(createdNames, cfg.Name)
 				return "cid", nil
 			},
-			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, aliases ...string) error {
+			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, opts runtime.NetworkConnectOptions) error {
 				return nil
 			},
 		}
@@ -957,7 +957,9 @@ func TestCreateContainersProfiles(t *testing.T) {
 				created = append(created, cfg.Labels[LabelService])
 				return "cid", nil
 			},
-			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, aliases ...string) error { return nil },
+			NetworkConnectFn: func(ctx context.Context, networkID, containerID string, opts runtime.NetworkConnectOptions) error {
+				return nil
+			},
 		}
 		tk := newTestKraken(t, rt)
 		if err := CreateContainers(tk.Kraken, appName, serviceFilter, opts); err != nil {
